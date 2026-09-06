@@ -1,0 +1,73 @@
+name: CI and CD for develop to production
+
+on:
+  pull_request:
+    branches:
+      - develop
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - closed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  checks: write
+  pull-requests: write
+
+jobs:
+  ci-build-and-test:
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+          cache: true
+
+      - name: Restore dependencies
+        run: dotnet restore .\ExvoPlatform.sln
+
+      - name: Build solution
+        run: dotnet build .\ExvoPlatform.sln --configuration Release --no-restore
+
+      - name: Run tests
+        run: dotnet test .\ExvoPlatform.sln --configuration Release --no-build --verbosity normal
+
+  merge-develop-into-production:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'feature/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge develop into production
+        run: |
+          set -e
+
+          git fetch origin --prune
+
+          if git ls-remote --exit-code --heads origin production > /dev/null 2>&1; then
+            git checkout -B production origin/production
+          else
+            git checkout -B production origin/main
+          fi
+
+          git merge --no-ff origin/develop -m "Merge develop into production after feature PR #${{ github.event.pull_request.number }}"
+          git push origin production
