@@ -33,13 +33,27 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Restore dependencies
-        run: dotnet restore .\ExvoPlatform.sln
+        run: |
+          find . -name '*.csproj' -print0 | while IFS= read -r -d '' project; do
+            dotnet restore "$project"
+          done
 
       - name: Build solution
-        run: dotnet build .\ExvoPlatform.sln --configuration Release --no-restore
+        run: |
+          find . -name '*.csproj' -print0 | while IFS= read -r -d '' project; do
+            dotnet build "$project" --configuration Release --no-restore
+          done
 
       - name: Run tests
-        run: dotnet test .\ExvoPlatform.sln --configuration Release --no-build --verbosity normal
+        run: |
+          mapfile -d '' test_projects < <(find . -name '*Tests*.csproj' -print0)
+          if [ "${#test_projects[@]}" -eq 0 ]; then
+            echo "No test projects found. Skipping tests."
+            exit 0
+          fi
+          for project in "${test_projects[@]}"; do
+            dotnet test "$project" --configuration Release --no-build --verbosity normal
+          done
 
   merge-develop-into-production:
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'feature/')
