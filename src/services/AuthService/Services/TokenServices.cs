@@ -24,14 +24,28 @@ namespace ExvoAuthService.Services
             var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
             var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
-            var claims = new[]
+            var claims = new List<Claim>
             {
                 new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
                 new Claim(JwtRegisteredClaimNames.Email, user.Email),
-                new Claim("fullName", user.FullName),
-                new Claim(ClaimTypes.Role, user.Role),
+                new Claim("fullName", user.FullName ?? string.Empty),
+                new Claim(ClaimTypes.Role, user.Role ?? "Attendee"),
+                new Claim("role", user.Role ?? "Attendee"),
                 new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
             };
+
+            if (!string.IsNullOrEmpty(user.CompanyName))
+            {
+                claims.Add(new Claim("companyName", user.CompanyName));
+            }
+            if (!string.IsNullOrEmpty(user.CompanyRegNumber))
+            {
+                claims.Add(new Claim("companyRegNumber", user.CompanyRegNumber));
+            }
+            if (!string.IsNullOrEmpty(user.ContactNumber))
+            {
+                claims.Add(new Claim("contactNumber", user.ContactNumber));
+            }
 
             var tokenDescriptor = new SecurityTokenDescriptor
             {

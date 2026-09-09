@@ -3114,24 +3114,31 @@
     ]
   },
   "packageFolders": {
-    "C:\\Users\\Ashen Alwis\\.nuget\\packages\\": {}
+    "C:\\Users\\DASUN\\.nuget\\packages\\": {},
+    "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages": {}
   },
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "D:\\SLIIT BSC.(HONS) COMPUTER SCIENCE\\YEAR 3 SEMESTER 1\\csp\\project\\exvo\\src\\services\\AuthService\\ExvoAuthService.csproj",
+      "projectUniqueName": "C:\\Users\\DASUN\\Downloads\\exvo\\exvo\\src\\services\\AuthService\\ExvoAuthService.csproj",
       "projectName": "ExvoAuthService",
-      "projectPath": "D:\\SLIIT BSC.(HONS) COMPUTER SCIENCE\\YEAR 3 SEMESTER 1\\csp\\project\\exvo\\src\\services\\AuthService\\ExvoAuthService.csproj",
-      "packagesPath": "C:\\Users\\Ashen Alwis\\.nuget\\packages\\",
-      "outputPath": "D:\\SLIIT BSC.(HONS) COMPUTER SCIENCE\\YEAR 3 SEMESTER 1\\csp\\project\\exvo\\src\\services\\AuthService\\obj\\",
+      "projectPath": "C:\\Users\\DASUN\\Downloads\\exvo\\exvo\\src\\services\\AuthService\\ExvoAuthService.csproj",
+      "packagesPath": "C:\\Users\\DASUN\\.nuget\\packages\\",
+      "outputPath": "C:\\Users\\DASUN\\Downloads\\exvo\\exvo\\src\\services\\AuthService\\obj\\",
       "projectStyle": "PackageReference",
+      "fallbackFolders": [
+        "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
+      ],
       "configFilePaths": [
-        "C:\\Users\\Ashen Alwis\\AppData\\Roaming\\NuGet\\NuGet.Config"
+        "C:\\Users\\DASUN\\AppData\\Roaming\\NuGet\\NuGet.Config",
+        "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
+        "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
       ],
       "originalTargetFrameworks": [
         "net8.0"
       ],
       "sources": {
+        "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
         "https://api.nuget.org/v3/index.json": {}
       },
       "frameworks": {
@@ -3149,7 +3156,8 @@
         "enableAudit": "true",
         "auditLevel": "low",
         "auditMode": "direct"
-      }
+      },
+      "SdkAnalysisLevel": "9.0.100"
     },
     "frameworks": {
       "net8.0": {
@@ -3211,7 +3219,7 @@
             "privateAssets": "all"
           }
         },
-        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.424/PortableRuntimeIdentifierGraph.json"
+        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.101/PortableRuntimeIdentifierGraph.json"
       }
     }
   }

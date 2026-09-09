@@ -1,11 +1,12 @@
 {
   "Version": 1,
-  "Hash": "u2Sb29urfEfa6RHNVPFYPXOP1JBJfh6e2htOeEcX7Lw=",
+  "Hash": "iVSZZM9w1k+jeaPkPK0iOhL4Twwr+qdmeinCIfA88B8=",
   "Source": "ExvoAuthService",
   "BasePath": "_content/ExvoAuthService",
   "Mode": "Default",
   "ManifestType": "Build",
   "ReferencedProjectsConfiguration": [],
   "DiscoveryPatterns": [],
-  "Assets": []
+  "Assets": [],
+  "Endpoints": []
 }

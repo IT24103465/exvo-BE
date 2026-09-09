@@ -1,0 +1,6 @@
+@Exvo.CheckInService_HostAddress = http://localhost:5028
+
+GET {{Exvo.CheckInService_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
