@@ -44,7 +44,7 @@ builder.Services.AddAuthorization();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v1", new OpenApiInfo { Title = "Exvo Auth API", Version = "v1" });
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "Exvo Platform API", Version = "v1" });
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
         Name = "Authorization",
@@ -83,6 +83,18 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
+// Automatically ensure DB tables are created / migrated
+try
+{
+    using var scope = app.Services.CreateScope();
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    db.Database.EnsureCreated();
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"DB Initialization note: {ex.Message}");
+}
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -90,9 +102,27 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseCors("AllowAll");
-
 app.UseAuthentication();
 app.UseAuthorization();
+
+// Helper to get authenticated user ID from Claims
+static int? GetUserIdFromClaims(ClaimsPrincipal claimsPrincipal)
+{
+    var userIdClaim = claimsPrincipal.FindFirst(ClaimTypes.NameIdentifier)?.Value 
+                      ?? claimsPrincipal.FindFirst("sub")?.Value 
+                      ?? claimsPrincipal.FindFirst("nameid")?.Value;
+
+    if (string.IsNullOrEmpty(userIdClaim) || !int.TryParse(userIdClaim, out int userId))
+    {
+        return null;
+    }
+    return userId;
+}
+
+
+// ══════════════════════════════════════════════════════
+// ── AUTHENTICATION & PROFILE ENDPOINTS ──
+// ══════════════════════════════════════════════════════
 
 // POST /api/auth/register
 app.MapPost("/api/auth/register", async (RegisterRequest request, AppDbContext db, TokenService tokenService) =>
@@ -105,24 +135,36 @@ app.MapPost("/api/auth/register", async (RegisterRequest request, AppDbContext d
     var existingUser = await db.Users.FirstOrDefaultAsync(u => u.Email == request.Email);
     if (existingUser != null)
     {
-        return Results.Conflict(new { Message = "A user with this email already exists." });
+        return Results.Conflict(new { Message = "An account with this email already exists!" });
     }
 
-    var passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
+    var hashedPassword = BCrypt.Net.BCrypt.HashPassword(request.Password);
 
     var user = new User
     {
-        FullName = request.FullName,
-        Email = request.Email,
-        PasswordHash = passwordHash,
-        
-        // SECURITY FIX: Hardcoded to "Attendee". The user can no longer self-assign "Organizer" or "Admin".
-        Role = "Attendee", 
-        
+        FullName = request.FullName?.Trim() ?? string.Empty,
+        Email = request.Email.Trim(),
+        PasswordHash = hashedPassword,
+        Role = request.Role?.Trim() ?? "Attendee",
+        CompanyName = request.CompanyName?.Trim(),
+        CompanyRegNumber = request.CompanyRegNumber?.Trim(),
+        ContactNumber = request.ContactNumber?.Trim(),
         CreatedAt = DateTime.UtcNow
     };
 
     db.Users.Add(user);
+    await db.SaveChangesAsync();
+
+    var profile = new Profile
+    {
+        UserId = user.Id,
+        Name = user.FullName,
+        Email = user.Email,
+        PhoneNumber = user.ContactNumber,
+        CreatedAt = DateTime.UtcNow,
+        UpdatedAt = DateTime.UtcNow
+    };
+    db.Profiles.Add(profile);
     await db.SaveChangesAsync();
 
     var token = tokenService.GenerateToken(user);
@@ -132,8 +174,13 @@ app.MapPost("/api/auth/register", async (RegisterRequest request, AppDbContext d
         user.FullName,
         user.Email,
         user.Role,
+        user.CompanyName,
+        user.CompanyRegNumber,
+        user.ContactNumber,
         Token: token,
-        Message: "Registration successful!"
+        Message: "Registration successful!",
+        ProfilePicture: profile.ProfilePicture,
+        Address: profile.Address
     ));
 })
 .WithName("Register")
@@ -153,6 +200,22 @@ app.MapPost("/api/auth/login", async (LoginRequest request, AppDbContext db, Tok
         return Results.Json(new { Message = "Invalid email or password!" }, statusCode: 401);
     }
 
+    var profile = await db.Profiles.FirstOrDefaultAsync(p => p.UserId == user.Id);
+    if (profile == null)
+    {
+        profile = new Profile
+        {
+            UserId = user.Id,
+            Name = user.FullName,
+            Email = user.Email,
+            PhoneNumber = user.ContactNumber,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+        db.Profiles.Add(profile);
+        await db.SaveChangesAsync();
+    }
+
     var token = tokenService.GenerateToken(user);
 
     return Results.Ok(new AuthResponse(
@@ -160,41 +223,141 @@ app.MapPost("/api/auth/login", async (LoginRequest request, AppDbContext db, Tok
         user.FullName,
         user.Email,
         user.Role,
+        user.CompanyName,
+        user.CompanyRegNumber,
+        user.ContactNumber,
         Token: token,
-        Message: "Login successful!"
+        Message: "Login successful!",
+        ProfilePicture: profile.ProfilePicture,
+        Address: profile.Address
     ));
 })
 .WithName("Login")
 .WithOpenApi();
 
-// GET /api/auth/me (Protected Endpoint)
-app.MapGet("/api/auth/me", async (ClaimsPrincipal claimsPrincipal, AppDbContext db) =>
+// GET /api/auth/profile
+var handleGetProfile = async (ClaimsPrincipal claimsPrincipal, AppDbContext db) =>
 {
-    var userIdClaim = claimsPrincipal.FindFirst(ClaimTypes.NameIdentifier)?.Value 
-                      ?? claimsPrincipal.FindFirst("sub")?.Value;
-
-    if (string.IsNullOrEmpty(userIdClaim) || !int.TryParse(userIdClaim, out int userId))
+    var userId = GetUserIdFromClaims(claimsPrincipal);
+    if (userId == null)
     {
         return Results.Unauthorized();
     }
 
-    var user = await db.Users.FindAsync(userId);
+    var user = await db.Users.FindAsync(userId.Value);
     if (user == null)
     {
         return Results.NotFound(new { Message = "User not found." });
     }
 
-    return Results.Ok(new
+    var profile = await db.Profiles.FirstOrDefaultAsync(p => p.UserId == user.Id);
+    if (profile == null)
     {
+        profile = new Profile
+        {
+            UserId = user.Id,
+            Name = user.FullName,
+            Email = user.Email,
+            PhoneNumber = user.ContactNumber,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+        db.Profiles.Add(profile);
+        await db.SaveChangesAsync();
+    }
+
+    return Results.Ok(new ProfileResponse(
+        profile.Id,
         user.Id,
-        user.FullName,
-        user.Email,
+        profile.Name,
+        profile.Email,
+        profile.Address,
+        profile.PhoneNumber,
+        profile.ProfilePicture,
         user.Role,
-        user.CreatedAt
-    });
-})
-.RequireAuthorization()
-.WithName("GetCurrentUser")
-.WithOpenApi();
+        user.CompanyName,
+        user.CompanyRegNumber,
+        profile.CreatedAt,
+        profile.UpdatedAt
+    ));
+};
+
+app.MapGet("/api/auth/profile", handleGetProfile).RequireAuthorization().WithName("GetProfile").WithOpenApi();
+app.MapGet("/api/profile", handleGetProfile).RequireAuthorization().WithName("GetProfileAlias").WithOpenApi();
+
+// PUT /api/auth/profile
+var handleUpdateProfile = async (UpdateProfileRequest request, ClaimsPrincipal claimsPrincipal, AppDbContext db) =>
+{
+    var userId = GetUserIdFromClaims(claimsPrincipal);
+    if (userId == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Email))
+    {
+        return Results.BadRequest(new { Message = "Name and Email are required." });
+    }
+
+    var user = await db.Users.FindAsync(userId.Value);
+    if (user == null)
+    {
+        return Results.NotFound(new { Message = "User not found." });
+    }
+
+    if (!string.Equals(user.Email, request.Email, StringComparison.OrdinalIgnoreCase))
+    {
+        var emailExists = await db.Users.AnyAsync(u => u.Email == request.Email && u.Id != user.Id);
+        if (emailExists)
+        {
+            return Results.Conflict(new { Message = "This email is already in use by another account." });
+        }
+    }
+
+    var profile = await db.Profiles.FirstOrDefaultAsync(p => p.UserId == user.Id);
+    if (profile == null)
+    {
+        profile = new Profile
+        {
+            UserId = user.Id,
+            CreatedAt = DateTime.UtcNow
+        };
+        db.Profiles.Add(profile);
+    }
+
+    profile.Name = request.Name.Trim();
+    profile.Email = request.Email.Trim();
+    profile.Address = request.Address?.Trim();
+    profile.PhoneNumber = request.PhoneNumber?.Trim();
+    if (request.ProfilePicture != null)
+    {
+        profile.ProfilePicture = request.ProfilePicture;
+    }
+    profile.UpdatedAt = DateTime.UtcNow;
+
+    user.FullName = profile.Name;
+    user.Email = profile.Email;
+    user.ContactNumber = profile.PhoneNumber;
+
+    await db.SaveChangesAsync();
+
+    return Results.Ok(new ProfileResponse(
+        profile.Id,
+        user.Id,
+        profile.Name,
+        profile.Email,
+        profile.Address,
+        profile.PhoneNumber,
+        profile.ProfilePicture,
+        user.Role,
+        user.CompanyName,
+        user.CompanyRegNumber,
+        profile.CreatedAt,
+        profile.UpdatedAt
+    ));
+};
+
+app.MapPut("/api/auth/profile", handleUpdateProfile).RequireAuthorization().WithName("UpdateProfile").WithOpenApi();
+app.MapPut("/api/profile", handleUpdateProfile).RequireAuthorization().WithName("UpdateProfileAlias").WithOpenApi();
 
 app.Run();

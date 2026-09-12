@@ -6,7 +6,10 @@ namespace ExvoAuthService.Models
         public string FullName { get; set; } = string.Empty;
         public string Email { get; set; } = string.Empty;
         public string PasswordHash { get; set; } = string.Empty;
-        public string Role { get; set; } = "Attendee"; 
+        public string Role { get; set; } = "Attendee"; // "Attendee" or "Company"
+        public string? CompanyName { get; set; }
+        public string? CompanyRegNumber { get; set; }
+        public string? ContactNumber { get; set; }
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     }
 }

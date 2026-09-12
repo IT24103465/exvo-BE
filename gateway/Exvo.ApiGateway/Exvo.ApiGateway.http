@@ -1,6 +1,0 @@
-@Exvo.ApiGateway_HostAddress = http://localhost:5050
-
-GET {{Exvo.ApiGateway_HostAddress}}/weatherforecast/
-Accept: application/json
-
-###

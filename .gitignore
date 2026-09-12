@@ -1,0 +1,49 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio and VS Code
+.vs/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Test results and coverage
+TestResults/
+*.trx
+coverage/
+.coverage
+.coverage.*
+
+# NuGet and package caches
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+
+# Node.js and npm
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.npmrc
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+appsettings.Local.json
+
+# Docker local overrides
+docker-compose.override.yml
+
+# Operating system files
+.DS_Store
+Thumbs.db
