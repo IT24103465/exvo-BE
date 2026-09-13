@@ -14,8 +14,13 @@ var builder = WebApplication.CreateBuilder(args);
 // ── SERVICE CONFIGURATION ──
 // ══════════════════════════════════════════════════════
 
-// 1. Database Context — own database: exvo_event_catalog_db
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+// 1. Database Context — own database: exvo_catalog_db
+var connectionString = Environment.GetEnvironmentVariable("EXVO_CATALOG_MYSQL_CONNECTION_STRING")
+                       ?? builder.Configuration.GetConnectionString("DefaultConnection");
+if (string.IsNullOrWhiteSpace(connectionString))
+{
+    throw new InvalidOperationException("Catalog database connection string is not configured.");
+}
 builder.Services.AddDbContext<CatalogDbContext>(options =>
     options.UseMySql(connectionString, new MySqlServerVersion(new Version(8, 0, 36))));
 
@@ -147,7 +152,7 @@ static EventResponse MapEventToResponse(Event ev)
         tiers,
         ev.MinPrice,
         ev.TotalCapacity,
-        ev.CoverImage,
+        ev.PosterImage,
         ev.Description,
         ev.Status,
         ev.CreatedAt,
@@ -158,6 +163,19 @@ static EventResponse MapEventToResponse(Event ev)
 // ══════════════════════════════════════════════════════
 // ── EVENT ENDPOINTS ──
 // ══════════════════════════════════════════════════════
+
+// GET /api/categories — categories currently stored in the catalog database
+app.MapGet("/api/categories", async (CatalogDbContext db) =>
+{
+    var categories = await db.Categories
+        .OrderBy(c => c.Name)
+        .Select(c => new { c.Id, c.Name, c.Description })
+        .ToListAsync();
+
+    return Results.Ok(categories);
+})
+.WithName("GetCategories")
+.WithOpenApi();
 
 // GET /api/events — all published events (Public)
 app.MapGet("/api/events", async (CatalogDbContext db) =>

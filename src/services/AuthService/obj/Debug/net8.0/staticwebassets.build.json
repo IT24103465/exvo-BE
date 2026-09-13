@@ -1,12 +1,1 @@
-{
-  "Version": 1,
-  "Hash": "iVSZZM9w1k+jeaPkPK0iOhL4Twwr+qdmeinCIfA88B8=",
-  "Source": "ExvoAuthService",
-  "BasePath": "_content/ExvoAuthService",
-  "Mode": "Default",
-  "ManifestType": "Build",
-  "ReferencedProjectsConfiguration": [],
-  "DiscoveryPatterns": [],
-  "Assets": [],
-  "Endpoints": []
-}
+{"Version":1,"Hash":"NZ9Vxn5u0AeFIZvhKrmEgXWsNZi/MrKEMNLz/jFiMTc=","Source":"ExvoAuthService","BasePath":"/","Mode":"Root","ManifestType":"Build","ReferencedProjectsConfiguration":[],"DiscoveryPatterns":[],"Assets":[],"Endpoints":[]}

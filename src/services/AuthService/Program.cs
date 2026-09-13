@@ -11,7 +11,12 @@ using ExvoAuthService.Services;
 var builder = WebApplication.CreateBuilder(args);
 
 // 1. Database Context
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+var connectionString = Environment.GetEnvironmentVariable("EXVO_AUTH_MYSQL_CONNECTION_STRING")
+                       ?? builder.Configuration.GetConnectionString("DefaultConnection");
+if (string.IsNullOrWhiteSpace(connectionString))
+{
+    throw new InvalidOperationException("Auth database connection string is not configured.");
+}
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString)));
 

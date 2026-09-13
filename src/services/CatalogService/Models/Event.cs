@@ -59,6 +59,13 @@ namespace Exvo.CatalogService.Models
         [Column(TypeName = "longtext")]
         public string? CoverImage { get; set; }
 
+        // Existing Azure events store their poster in this legacy column.
+        [Column(TypeName = "longtext")]
+        public string? ImageUrl { get; set; }
+
+        [NotMapped]
+        public string? PosterImage => string.IsNullOrWhiteSpace(CoverImage) ? ImageUrl : CoverImage;
+
         [Column(TypeName = "text")]
         public string? Description { get; set; }
 
