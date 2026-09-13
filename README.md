@@ -12,7 +12,7 @@ Exvo is an event experience platform built as a distributed .NET application. Th
 - Catalog service persistence in the `exvo_catalog_db` MySQL database.
 - Swagger/OpenAPI support for ASP.NET Core services.
 - xUnit test projects for Auth and Booking services.
-- Docker Compose configuration for a local MySQL 8 database.
+- Docker Compose configuration for the backend services, Kafka, and an optional local MySQL fallback.
 
 ## Service Overview
 
@@ -54,7 +54,7 @@ Other scaffolded services (not routed by the gateway):
 ## Prerequisites
 
 - .NET 8 SDK
-- Docker Desktop with Docker Compose (only for the local MySQL fallback)
+- Docker Desktop with Docker Compose
 - Visual Studio 2022 or VS Code with C# Dev Kit
 
 ```powershell
@@ -101,12 +101,66 @@ Azure resource commands. Catalog's existing startup category seeding still runs.
 The manual local/Docker workflow below and its connection-string fallbacks remain
 available when the service-specific environment variables are unset.
 
+## Docker development
+
+Prerequisite: Docker Desktop must be running.
+
+First-time setup from the backend root:
+
+```powershell
+Copy-Item .env.example .env.local
+```
+
+Edit `.env.local` and set `AZURE_MYSQL_PASSWORD` to the Azure MySQL password.
+Docker Compose does not automatically read `.env.local`, so pass it explicitly
+with `--env-file`. The password is used only for container environment
+substitution and is not copied into the Docker images or written to application
+configuration.
+
+Build and start AuthService, CatalogService, the YARP API Gateway, and Kafka:
+
+```powershell
+docker compose --env-file .env.local build
+docker compose --env-file .env.local up
+```
+
+Or build and start everything in one command:
+
+```powershell
+docker compose --env-file .env.local up --build
+```
+
+After exporting the variables from `.env.local` into the current shell, the
+equivalent shorter commands are `docker compose build` and `docker compose up`.
+
+Stop the stack:
+
+```powershell
+docker compose --env-file .env.local down
+```
+
+View logs:
+
+```powershell
+docker compose --env-file .env.local logs -f
+```
+
+The gateway is available at `http://localhost:5000`, AuthService at
+`http://localhost:5284`, CatalogService at `http://localhost:5255`, and Kafka
+is available to host clients at `localhost:29092`. Containers use `kafka:9092`
+for Kafka and the gateway uses `authservice:8080` and `catalogservice:8080` for
+service-to-service traffic.
+
+The local MySQL fallback is disabled by default. To run it separately, use
+`docker compose --profile local up -d mysql-dev`; it is never selected by the
+backend containers when Azure connection variables are supplied.
+
 ## Manual startup with local Docker MySQL
 
 Run these commands from `exvo-be` (the directory containing `ExvoPlatform.sln`).
 
 ```powershell
-docker compose up -d mysql-dev
+docker compose --profile local up -d mysql-dev
 dotnet restore .\ExvoPlatform.sln
 dotnet build .\ExvoPlatform.sln
 dotnet ef database update --project .\src\services\AuthService\ExvoAuthService.csproj
