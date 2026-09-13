@@ -4,51 +4,38 @@ namespace ExvoAuthService.Models
         string FullName,
         string Email,
         string Password,
-        string? Role, // "Attendee" or "Company"
-        string? CompanyName = null,
-        string? CompanyRegNumber = null,
-        string? ContactNumber = null
-    );
+        string? Role, // " Attendee\ or \Organizer\
+ string? CompanyName = null,
+ string? CompanyRegNumber = null,
+ string? ContactNumber = null
+ );
 
-    public record LoginRequest(
-        string Email,
-        string Password
-    );
+ public record LoginRequest(
+ string Email,
+ string Password
+ );
 
-    public record AuthResponse(
-        int Id,
-        string FullName,
-        string Email,
-        string Role,
-        string? CompanyName,
-        string? CompanyRegNumber,
-        string? ContactNumber,
-        string Token,
-        string Message,
-        string? ProfilePicture = null,
-        string? Address = null
-    );
+ public record AuthResponse(
+ int Id,
+ string FullName,
+ string Email,
+ string Role,
+ string? CompanyName,
+ string? CompanyRegNumber,
+ string? ContactNumber,
+ string? ProfilePicture,
+ string Token,
+ string Message,
+ string? Address = null
+ );
 
-    public record ProfileResponse(
-        int Id,
-        int UserId,
-        string Name,
-        string Email,
-        string? Address,
-        string? PhoneNumber,
-        string? ProfilePicture,
-        string Role,
-        string? CompanyName,
-        string? CompanyRegNumber,
-        DateTime CreatedAt,
-        DateTime UpdatedAt
-    );
-
-    public record UpdateProfileRequest(
-        string Name,
-        string Email,
-        string? Address = null,
-        string? PhoneNumber = null,
-        string? ProfilePicture = null
-    );
+ public record UpdateProfileRequest(
+ string? FullName,
+ string? Name,
+ string? Email,
+ string? ContactNumber,
+ string? PhoneNumber,
+ string? Address,
+ string? ProfilePicture
+ );
 }

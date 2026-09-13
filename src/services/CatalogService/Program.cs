@@ -6,20 +6,18 @@ using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using Exvo.CatalogService.Data;
 using Exvo.CatalogService.Models;
-using Exvo.CatalogService.Models.DTOs;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// ══════════════════════════════════════════════════════
-// ── SERVICE CONFIGURATION ──
-// ══════════════════════════════════════════════════════
+// 1. Database Context
+var connectionString = builder.Configuration["EXVO_CATALOG_MYSQL_CONNECTION_STRING"]
+    ?? builder.Configuration.GetConnectionString("DefaultConnection")
+    ?? throw new InvalidOperationException("No Catalog Service MySQL connection string is configured.");
 
-// 1. Database Context — own database: exvo_event_catalog_db
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 builder.Services.AddDbContext<CatalogDbContext>(options =>
-    options.UseMySql(connectionString, new MySqlServerVersion(new Version(8, 0, 36))));
+    options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString)));
 
-// 2. JWT Authentication — same key/issuer/audience as AuthService
+// 2. JWT Authentication Setup
 var jwtKey = builder.Configuration["Jwt:Key"] ?? "Exvo_Super_Secret_JWT_Key_2026_Must_Be_Long_Enough!";
 var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "ExvoAuthService";
 var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "ExvoPlatform";
@@ -29,8 +27,8 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     {
         options.TokenValidationParameters = new TokenValidationParameters
         {
-            ValidateIssuer = true,
-            ValidateAudience = true,
+            ValidateIssuer = false,
+            ValidateAudience = false,
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
             ValidIssuer = jwtIssuer,
@@ -41,11 +39,11 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 
 builder.Services.AddAuthorization();
 
-// 3. Swagger with JWT Authorize button
+// 3. Swagger / OpenAPI with Bearer Auth
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v1", new OpenApiInfo { Title = "Exvo Catalog Service API", Version = "v1" });
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "Exvo Catalog API", Version = "v1" });
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
         Name = "Authorization",
@@ -84,20 +82,30 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-// ══════════════════════════════════════════════════════
-// ── DATABASE AUTO-INITIALIZATION ──
-// ══════════════════════════════════════════════════════
-
-try
+// Preserve existing IDs, seed categories, and patch DB schema for TicketTiersJson on startup.
+using (var scope = app.Services.CreateScope())
 {
-    using var scope = app.Services.CreateScope();
-    var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
-    db.Database.EnsureCreated();
-    Console.WriteLine("✅ CatalogService DB initialized: exvo_event_catalog_db");
-}
-catch (Exception ex)
-{
-    Console.WriteLine($"⚠️ CatalogService DB initialization note: {ex.Message}");
+    try
+    {
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        await CategorySeeder.SeedAsync(db);
+        try
+        {
+            db.Database.ExecuteSqlRaw("ALTER TABLE Events ADD COLUMN TicketTiersJson longtext NULL;");
+        }
+        catch { }
+        try
+        {
+            db.Database.ExecuteSqlRaw("UPDATE Events SET EventDate = STR_TO_DATE(LEFT(EventDate, 19), '%Y-%m-%dT%H:%i:%s') WHERE EventDate LIKE '%T%';");
+        }
+        catch { }
+        try
+        {
+            db.Database.ExecuteSqlRaw("UPDATE Events SET CreatedAt = NOW() WHERE CreatedAt LIKE '%T%';");
+        }
+        catch { }
+    }
+    catch { }
 }
 
 if (app.Environment.IsDevelopment())
@@ -110,363 +118,261 @@ app.UseCors("AllowAll");
 app.UseAuthentication();
 app.UseAuthorization();
 
-// ══════════════════════════════════════════════════════
-// ── HELPER FUNCTIONS ──
-// ══════════════════════════════════════════════════════
+// --- PUBLIC CATEGORIES API ---
 
-static int? GetUserIdFromClaims(ClaimsPrincipal claimsPrincipal)
+app.MapGet("/api/catalog/categories", async (CatalogDbContext db) =>
 {
-    var userIdClaim = claimsPrincipal.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                      ?? claimsPrincipal.FindFirst("sub")?.Value
-                      ?? claimsPrincipal.FindFirst("nameid")?.Value;
-
-    if (string.IsNullOrEmpty(userIdClaim) || !int.TryParse(userIdClaim, out int userId))
-    {
-        return null;
-    }
-    return userId;
-}
-
-static EventResponse MapEventToResponse(Event ev)
-{
-    var tiers = ev.TicketTiers
-        .OrderBy(t => t.SortOrder)
-        .Select(t => new TicketTierDto(t.TierId, t.Name, t.Price, t.Quantity))
-        .ToList();
-
-    return new EventResponse(
-        ev.Id,
-        ev.UserId,
-        ev.OrganizerName,
-        ev.Title,
-        ev.ArtistOrOrganizer,
-        ev.CategoryName,
-        ev.EventDate,
-        ev.EventTime,
-        ev.VenueName,
-        tiers,
-        ev.MinPrice,
-        ev.TotalCapacity,
-        ev.CoverImage,
-        ev.Description,
-        ev.Status,
-        ev.CreatedAt,
-        ev.UpdatedAt
-    );
-}
-
-// ══════════════════════════════════════════════════════
-// ── EVENT ENDPOINTS ──
-// ══════════════════════════════════════════════════════
-
-// GET /api/events — all published events (Public)
-app.MapGet("/api/events", async (CatalogDbContext db) =>
-{
-    var events = await db.Events
-        .Include(e => e.TicketTiers)
-        .Where(e => e.Status == "Published")
-        .OrderByDescending(e => e.CreatedAt)
-        .ToListAsync();
-
-    var result = events.Select(MapEventToResponse).ToList();
-    return Results.Ok(result);
+    var categories = await db.Categories.ToListAsync();
+    return Results.Ok(categories);
 })
-.WithName("GetAllEvents")
+.WithName("GetCategories")
 .WithOpenApi();
 
-// GET /api/events/{id} — single event (Public)
-app.MapGet("/api/events/{id:int}", async (int id, CatalogDbContext db) =>
+app.MapPost("/api/catalog/categories", async (Category category, CatalogDbContext db) =>
 {
-    var ev = await db.Events
-        .Include(e => e.TicketTiers)
-        .FirstOrDefaultAsync(e => e.Id == id);
+    if (string.IsNullOrWhiteSpace(category.Name))
+    {
+        return Results.BadRequest(new { Message = "Category name is required." });
+    }
 
-    if (ev == null)
+    db.Categories.Add(category);
+    await db.SaveChangesAsync();
+
+    return Results.Created($"/api/catalog/categories/{category.Id}", category);
+})
+.WithName("CreateCategory")
+.WithOpenApi();
+
+// --- PUBLIC EVENTS SEARCH / BROWSING API ---
+
+app.MapGet("/api/catalog/events", async (int? categoryId, CatalogDbContext db) =>
+{
+    var query = db.Events.Include(e => e.Category).AsQueryable();
+
+    if (categoryId.HasValue)
+    {
+        query = query.Where(e => e.CategoryId == categoryId.Value);
+    }
+
+    var events = await query.ToListAsync();
+
+    var result = events.Select(e => new
+    {
+        e.Id,
+        e.Title,
+        e.Description,
+        e.Location,
+        e.Venue,
+        e.Price,
+        e.EventDate,
+        e.CategoryId,
+        CategoryName = e.Category != null ? e.Category.Name : "Music & Concerts",
+        Category = e.Category != null ? e.Category.Name : "Music & Concerts",
+        e.OrganizerId,
+        e.OrganizerName,
+        e.ImageUrl,
+        CoverImage = e.ImageUrl,
+        e.AvailableTickets,
+        e.TicketTiersJson,
+        e.CreatedAt
+    });
+
+    return Results.Ok(result);
+})
+.WithName("GetEvents")
+.WithOpenApi();
+
+app.MapGet("/api/catalog/events/my-events", async (ClaimsPrincipal claimsPrincipal, CatalogDbContext db) =>
+{
+    var userIdClaim = claimsPrincipal.FindFirst(ClaimTypes.NameIdentifier)?.Value 
+                      ?? claimsPrincipal.FindFirst("sub")?.Value;
+
+    int.TryParse(userIdClaim, out int organizerId);
+
+    var nameClaim = claimsPrincipal.FindFirst(ClaimTypes.Name)?.Value 
+                    ?? claimsPrincipal.FindFirst("name")?.Value
+                    ?? claimsPrincipal.FindFirst("companyName")?.Value;
+
+    var query = db.Events.Include(e => e.Category).AsQueryable();
+
+    if (organizerId > 0)
+    {
+        query = query.Where(e => e.OrganizerId == organizerId);
+    }
+    else if (!string.IsNullOrWhiteSpace(nameClaim))
+    {
+        query = query.Where(e => e.OrganizerName == nameClaim);
+    }
+
+    var events = await query.ToListAsync();
+
+    var result = events.Select(e => new
+    {
+        e.Id,
+        e.Title,
+        e.Description,
+        e.Location,
+        e.Venue,
+        e.Price,
+        e.EventDate,
+        e.CategoryId,
+        CategoryName = e.Category != null ? e.Category.Name : "Music & Concerts",
+        Category = e.Category != null ? e.Category.Name : "Music & Concerts",
+        e.OrganizerId,
+        e.OrganizerName,
+        e.ImageUrl,
+        CoverImage = e.ImageUrl,
+        e.AvailableTickets,
+        e.TicketTiersJson,
+        e.CreatedAt
+    });
+
+    return Results.Ok(result);
+})
+.WithName("GetMyEvents")
+.WithOpenApi();
+
+app.MapGet("/api/catalog/events/{id:int}", async (int id, CatalogDbContext db) =>
+{
+    var evt = await db.Events.Include(e => e.Category).FirstOrDefaultAsync(e => e.Id == id);
+    if (evt == null)
     {
         return Results.NotFound(new { Message = "Event not found." });
     }
 
-    return Results.Ok(MapEventToResponse(ev));
+    var result = new
+    {
+        evt.Id,
+        evt.Title,
+        evt.Description,
+        evt.Location,
+        evt.Venue,
+        evt.Price,
+        evt.EventDate,
+        evt.CategoryId,
+        CategoryName = evt.Category != null ? evt.Category.Name : "Music & Concerts",
+        Category = evt.Category != null ? evt.Category.Name : "Music & Concerts",
+        evt.OrganizerId,
+        evt.OrganizerName,
+        evt.ImageUrl,
+        CoverImage = evt.ImageUrl,
+        evt.AvailableTickets,
+        evt.TicketTiersJson,
+        evt.CreatedAt
+    };
+
+    return Results.Ok(result);
 })
 .WithName("GetEventById")
 .WithOpenApi();
 
-// GET /api/events/my-events — organizer's own events (Protected)
-app.MapGet("/api/events/my-events", async (ClaimsPrincipal claimsPrincipal, CatalogDbContext db) =>
+// --- EVENT CREATION API ---
+
+app.MapPost("/api/catalog/events", async (ClaimsPrincipal claimsPrincipal, Event evt, CatalogDbContext db) =>
 {
-    var userId = GetUserIdFromClaims(claimsPrincipal);
-    if (userId == null)
+    if (string.IsNullOrWhiteSpace(evt.Title))
     {
-        return Results.Unauthorized();
+        return Results.BadRequest(new { Message = "Event title is required." });
     }
 
-    var events = await db.Events
-        .Include(e => e.TicketTiers)
-        .Where(e => e.UserId == userId.Value)
-        .OrderByDescending(e => e.CreatedAt)
-        .ToListAsync();
+    var userIdClaim = claimsPrincipal.FindFirst(ClaimTypes.NameIdentifier)?.Value 
+                      ?? claimsPrincipal.FindFirst("sub")?.Value;
 
-    var result = events.Select(MapEventToResponse).ToList();
-    return Results.Ok(result);
-})
-.RequireAuthorization()
-.WithName("GetMyEvents")
-.WithOpenApi();
-
-// POST /api/events — create event (Protected)
-app.MapPost("/api/events", async (CreateEventRequest request, ClaimsPrincipal claimsPrincipal, CatalogDbContext db) =>
-{
-    var userId = GetUserIdFromClaims(claimsPrincipal);
-    if (userId == null)
+    if (int.TryParse(userIdClaim, out int organizerId) && organizerId > 0)
     {
-        return Results.Unauthorized();
+        evt.OrganizerId = organizerId;
     }
 
-    if (string.IsNullOrWhiteSpace(request.Title) || string.IsNullOrWhiteSpace(request.Date) || string.IsNullOrWhiteSpace(request.Venue))
+    if (string.IsNullOrWhiteSpace(evt.OrganizerName))
     {
-        return Results.BadRequest(new { Message = "Title, Date, and Venue are required." });
-    }
+        var nameClaim = claimsPrincipal.FindFirst(ClaimTypes.Name)?.Value 
+                        ?? claimsPrincipal.FindFirst("name")?.Value
+                        ?? claimsPrincipal.FindFirst("companyName")?.Value;
 
-    // Get organizer name from JWT claims
-    var organizerName = claimsPrincipal.FindFirst("fullName")?.Value ?? "Exvo Organizer";
-
-    var tiers = request.TicketTiers ?? new List<TicketTierDto>();
-    decimal minPrice = tiers.Count > 0 ? tiers.Min(t => t.Price) : 0;
-    int totalCap = tiers.Count > 0 ? tiers.Sum(t => t.Quantity) : 500;
-
-    // Resolve category (find or create)
-    var categoryName = string.IsNullOrWhiteSpace(request.Category) ? "Concert" : request.Category.Trim();
-    var category = await db.Categories.FirstOrDefaultAsync(c => c.Name == categoryName);
-    if (category == null)
-    {
-        category = new Category { Name = categoryName, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
-        db.Categories.Add(category);
-        await db.SaveChangesAsync();
-    }
-
-    // Resolve venue (find or create)
-    var venueName = request.Venue.Trim();
-    var venue = await db.Venues.FirstOrDefaultAsync(v => v.Name == venueName);
-    if (venue == null)
-    {
-        venue = new Venue { Name = venueName, TotalCapacity = totalCap, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
-        db.Venues.Add(venue);
-        await db.SaveChangesAsync();
-    }
-
-    var newEvent = new Event
-    {
-        UserId = userId.Value,
-        OrganizerName = string.IsNullOrWhiteSpace(request.ArtistOrOrganizer) ? organizerName : request.ArtistOrOrganizer.Trim(),
-        Title = request.Title.Trim(),
-        ArtistOrOrganizer = request.ArtistOrOrganizer?.Trim(),
-        CategoryId = category.Id,
-        CategoryName = categoryName,
-        VenueId = venue.Id,
-        VenueName = venueName,
-        EventDate = request.Date.Trim(),
-        EventTime = string.IsNullOrWhiteSpace(request.Time) ? "19:00" : request.Time.Trim(),
-        MinPrice = minPrice,
-        TotalCapacity = totalCap,
-        CoverImage = request.CoverImage,
-        Description = request.Description?.Trim(),
-        Status = "Published",
-        CreatedAt = DateTime.UtcNow,
-        UpdatedAt = DateTime.UtcNow
-    };
-
-    db.Events.Add(newEvent);
-    await db.SaveChangesAsync();
-
-    // Add ticket tiers
-    for (int i = 0; i < tiers.Count; i++)
-    {
-        var tier = tiers[i];
-        db.TicketTiers.Add(new TicketTier
+        if (!string.IsNullOrWhiteSpace(nameClaim))
         {
-            EventId = newEvent.Id,
-            TierId = tier.Id,
-            Name = tier.Name,
-            Price = tier.Price,
-            Quantity = tier.Quantity,
-            SortOrder = i,
-            CreatedAt = DateTime.UtcNow
-        });
+            evt.OrganizerName = nameClaim;
+        }
+        else
+        {
+            evt.OrganizerName = "EXVO Organizer";
+        }
     }
+
+    var categoryExists = await db.Categories.AnyAsync(c => c.Id == evt.CategoryId);
+    if (!categoryExists)
+    {
+        evt.CategoryId = 1;
+    }
+
+    db.Events.Add(evt);
     await db.SaveChangesAsync();
 
-    // Reload with tiers for response
-    var created = await db.Events
-        .Include(e => e.TicketTiers)
-        .FirstAsync(e => e.Id == newEvent.Id);
-
-    return Results.Created($"/api/events/{created.Id}", MapEventToResponse(created));
+    return Results.Created($"/api/catalog/events/{evt.Id}", evt);
 })
-.RequireAuthorization()
-.WithName("CreateEvent")
 .WithOpenApi();
 
-// PUT /api/events/{id} — update event (Protected)
-app.MapPut("/api/events/{id:int}", async (int id, UpdateEventRequest request, ClaimsPrincipal claimsPrincipal, CatalogDbContext db) =>
+// --- EVENT UPDATE API ---
+
+app.MapPut("/api/catalog/events/{id:int}", async (int id, Event updatedEvt, ClaimsPrincipal claimsPrincipal, CatalogDbContext db) =>
 {
-    var userId = GetUserIdFromClaims(claimsPrincipal);
-    if (userId == null)
-    {
-        return Results.Unauthorized();
-    }
-
-    var ev = await db.Events
-        .Include(e => e.TicketTiers)
-        .FirstOrDefaultAsync(e => e.Id == id);
-
-    if (ev == null)
+    var evt = await db.Events.FindAsync(id);
+    if (evt == null)
     {
         return Results.NotFound(new { Message = "Event not found." });
     }
 
-    if (ev.UserId != userId.Value)
-    {
-        return Results.Forbid();
-    }
+    if (!string.IsNullOrWhiteSpace(updatedEvt.Title))
+        evt.Title = updatedEvt.Title;
 
-    var tiers = request.TicketTiers ?? new List<TicketTierDto>();
-    decimal minPrice = tiers.Count > 0 ? tiers.Min(t => t.Price) : ev.MinPrice;
-    int totalCap = tiers.Count > 0 ? tiers.Sum(t => t.Quantity) : ev.TotalCapacity;
+    if (!string.IsNullOrWhiteSpace(updatedEvt.Description))
+        evt.Description = updatedEvt.Description;
 
-    // Update category
-    var categoryName = request.Category?.Trim() ?? ev.CategoryName;
-    if (categoryName != ev.CategoryName)
-    {
-        var category = await db.Categories.FirstOrDefaultAsync(c => c.Name == categoryName);
-        if (category == null)
-        {
-            category = new Category { Name = categoryName, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
-            db.Categories.Add(category);
-            await db.SaveChangesAsync();
-        }
-        ev.CategoryId = category.Id;
-        ev.CategoryName = categoryName;
-    }
+    if (!string.IsNullOrWhiteSpace(updatedEvt.Location))
+        evt.Location = updatedEvt.Location;
 
-    // Update venue
-    var venueName = request.Venue.Trim();
-    if (venueName != ev.VenueName)
-    {
-        var venue = await db.Venues.FirstOrDefaultAsync(v => v.Name == venueName);
-        if (venue == null)
-        {
-            venue = new Venue { Name = venueName, TotalCapacity = totalCap, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
-            db.Venues.Add(venue);
-            await db.SaveChangesAsync();
-        }
-        ev.VenueId = venue.Id;
-        ev.VenueName = venueName;
-    }
+    if (!string.IsNullOrWhiteSpace(updatedEvt.Venue))
+        evt.Venue = updatedEvt.Venue;
 
-    ev.Title = request.Title.Trim();
-    ev.ArtistOrOrganizer = request.ArtistOrOrganizer?.Trim();
-    ev.EventDate = request.Date.Trim();
-    ev.EventTime = request.Time?.Trim() ?? ev.EventTime;
-    ev.MinPrice = minPrice;
-    ev.TotalCapacity = totalCap;
-    if (request.CoverImage != null)
-    {
-        ev.CoverImage = request.CoverImage;
-    }
-    ev.Description = request.Description?.Trim();
-    if (!string.IsNullOrWhiteSpace(request.Status))
-    {
-        ev.Status = request.Status.Trim();
-    }
-    ev.UpdatedAt = DateTime.UtcNow;
+    if (updatedEvt.Price > 0)
+        evt.Price = updatedEvt.Price;
 
-    // Replace ticket tiers
-    db.TicketTiers.RemoveRange(ev.TicketTiers);
-    for (int i = 0; i < tiers.Count; i++)
-    {
-        var tier = tiers[i];
-        db.TicketTiers.Add(new TicketTier
-        {
-            EventId = ev.Id,
-            TierId = tier.Id,
-            Name = tier.Name,
-            Price = tier.Price,
-            Quantity = tier.Quantity,
-            SortOrder = i,
-            CreatedAt = DateTime.UtcNow
-        });
-    }
+    if (updatedEvt.CategoryId > 0)
+        evt.CategoryId = updatedEvt.CategoryId;
+
+    if (!string.IsNullOrWhiteSpace(updatedEvt.OrganizerName))
+        evt.OrganizerName = updatedEvt.OrganizerName;
+
+    if (!string.IsNullOrWhiteSpace(updatedEvt.ImageUrl))
+        evt.ImageUrl = updatedEvt.ImageUrl;
+
+    if (updatedEvt.AvailableTickets > 0)
+        evt.AvailableTickets = updatedEvt.AvailableTickets;
+
+    if (updatedEvt.TicketTiersJson != null)
+        evt.TicketTiersJson = updatedEvt.TicketTiersJson;
 
     await db.SaveChangesAsync();
 
-    // Reload with updated tiers
-    var updated = await db.Events
-        .Include(e => e.TicketTiers)
-        .FirstAsync(e => e.Id == ev.Id);
-
-    return Results.Ok(MapEventToResponse(updated));
+    return Results.Ok(new { Message = "Event updated successfully.", Id = id });
 })
-.RequireAuthorization()
-.WithName("UpdateEvent")
 .WithOpenApi();
 
-// DELETE /api/events/{id} — delete event (Protected)
-app.MapDelete("/api/events/{id:int}", async (int id, ClaimsPrincipal claimsPrincipal, CatalogDbContext db) =>
-{
-    var userId = GetUserIdFromClaims(claimsPrincipal);
-    if (userId == null)
-    {
-        return Results.Unauthorized();
-    }
+// --- EVENT DELETION API ---
 
-    var ev = await db.Events.FindAsync(id);
-    if (ev == null)
+app.MapDelete("/api/catalog/events/{id:int}", async (int id, ClaimsPrincipal claimsPrincipal, CatalogDbContext db) =>
+{
+    var evt = await db.Events.FindAsync(id);
+    if (evt == null)
     {
         return Results.NotFound(new { Message = "Event not found." });
     }
 
-    if (ev.UserId != userId.Value)
-    {
-        return Results.Forbid();
-    }
-
-    db.Events.Remove(ev);
+    db.Events.Remove(evt);
     await db.SaveChangesAsync();
 
-    return Results.Ok(new { Message = "Event deleted successfully." });
+    return Results.Ok(new { Message = "Event deleted successfully.", Id = id });
 })
-.RequireAuthorization()
-.WithName("DeleteEvent")
-.WithOpenApi();
-
-// ══════════════════════════════════════════════════════
-// ── CATALOG REFERENCE ENDPOINTS ──
-// ══════════════════════════════════════════════════════
-
-// GET /api/catalog/categories — all categories (Public)
-app.MapGet("/api/catalog/categories", async (CatalogDbContext db) =>
-{
-    var categories = await db.Categories
-        .OrderBy(c => c.Name)
-        .Select(c => new CategoryResponse(c.Id, c.Name, c.Description, c.IconUrl))
-        .ToListAsync();
-
-    return Results.Ok(categories);
-})
-.WithName("GetAllCategories")
-.WithOpenApi();
-
-// GET /api/catalog/venues — all venues (Public)
-app.MapGet("/api/catalog/venues", async (CatalogDbContext db) =>
-{
-    var venues = await db.Venues
-        .OrderBy(v => v.Name)
-        .Select(v => new VenueResponse(v.Id, v.Name, v.Address, v.City, v.TotalCapacity, v.Description))
-        .ToListAsync();
-
-    return Results.Ok(venues);
-})
-.WithName("GetAllVenues")
 .WithOpenApi();
 
 app.Run();

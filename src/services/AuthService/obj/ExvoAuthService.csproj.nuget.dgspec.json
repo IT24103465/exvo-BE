@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\DASUN\\Downloads\\exvo\\exvo\\src\\services\\AuthService\\ExvoAuthService.csproj": {}
+    "C:\\Users\\DASUN\\Downloads\\exvo-be\\src\\services\\AuthService\\ExvoAuthService.csproj": {}
   },
   "projects": {
-    "C:\\Users\\DASUN\\Downloads\\exvo\\exvo\\src\\services\\AuthService\\ExvoAuthService.csproj": {
+    "C:\\Users\\DASUN\\Downloads\\exvo-be\\src\\services\\AuthService\\ExvoAuthService.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\DASUN\\Downloads\\exvo\\exvo\\src\\services\\AuthService\\ExvoAuthService.csproj",
+        "projectUniqueName": "C:\\Users\\DASUN\\Downloads\\exvo-be\\src\\services\\AuthService\\ExvoAuthService.csproj",
         "projectName": "ExvoAuthService",
-        "projectPath": "C:\\Users\\DASUN\\Downloads\\exvo\\exvo\\src\\services\\AuthService\\ExvoAuthService.csproj",
+        "projectPath": "C:\\Users\\DASUN\\Downloads\\exvo-be\\src\\services\\AuthService\\ExvoAuthService.csproj",
         "packagesPath": "C:\\Users\\DASUN\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\DASUN\\Downloads\\exvo\\exvo\\src\\services\\AuthService\\obj\\",
+        "outputPath": "C:\\Users\\DASUN\\Downloads\\exvo-be\\src\\services\\AuthService\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"

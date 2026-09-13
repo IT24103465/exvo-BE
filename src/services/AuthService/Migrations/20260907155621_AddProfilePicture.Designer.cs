@@ -12,8 +12,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace ExvoAuthService.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20260908075943_AddProfileTable")]
-    partial class AddProfileTable
+    [Migration("20260907155621_AddProfilePicture")]
+    partial class AddProfilePicture
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -24,52 +24,6 @@ namespace ExvoAuthService.Migrations
                 .HasAnnotation("Relational:MaxIdentifierLength", 64);
 
             MySqlModelBuilderExtensions.AutoIncrementColumns(modelBuilder);
-
-            modelBuilder.Entity("ExvoAuthService.Models.Profile", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("int");
-
-                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
-
-                    b.Property<string>("Address")
-                        .HasMaxLength(500)
-                        .HasColumnType("varchar(500)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime(6)");
-
-                    b.Property<string>("Email")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("varchar(255)");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(200)
-                        .HasColumnType("varchar(200)");
-
-                    b.Property<string>("PhoneNumber")
-                        .HasMaxLength(50)
-                        .HasColumnType("varchar(50)");
-
-                    b.Property<string>("ProfilePicture")
-                        .HasColumnType("LONGTEXT");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("datetime(6)");
-
-                    b.Property<int>("UserId")
-                        .HasColumnType("int");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("UserId")
-                        .IsUnique();
-
-                    b.ToTable("profiles", (string)null);
-                });
 
             modelBuilder.Entity("ExvoAuthService.Models.User", b =>
                 {
@@ -103,6 +57,9 @@ namespace ExvoAuthService.Migrations
                         .IsRequired()
                         .HasColumnType("longtext");
 
+                    b.Property<string>("ProfilePicture")
+                        .HasColumnType("longtext");
+
                     b.Property<string>("Role")
                         .IsRequired()
                         .HasColumnType("longtext");
@@ -110,17 +67,6 @@ namespace ExvoAuthService.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("Users");
-                });
-
-            modelBuilder.Entity("ExvoAuthService.Models.Profile", b =>
-                {
-                    b.HasOne("ExvoAuthService.Models.User", "User")
-                        .WithOne()
-                        .HasForeignKey("ExvoAuthService.Models.Profile", "UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("User");
                 });
 #pragma warning restore 612, 618
         }
