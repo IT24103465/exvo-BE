@@ -36,6 +36,7 @@ pnpm-debug.log*
 .npmrc
 
 # Local configuration and secrets
+# Includes .env.local; only the safe example may be committed.
 .env
 .env.*
 !.env.example

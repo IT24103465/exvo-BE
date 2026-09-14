@@ -1,3 +1,4 @@
+﻿using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -11,35 +12,29 @@ using ExvoAuthService.Services;
 var builder = WebApplication.CreateBuilder(args);
 
 // 1. Database Context
-var connectionString = Environment.GetEnvironmentVariable("EXVO_AUTH_MYSQL_CONNECTION_STRING")
-                       ?? builder.Configuration.GetConnectionString("DefaultConnection");
-if (string.IsNullOrWhiteSpace(connectionString))
-{
-    throw new InvalidOperationException("Auth database connection string is not configured.");
-}
+var connectionString = builder.Configuration["EXVO_AUTH_MYSQL_CONNECTION_STRING"]
+    ?? builder.Configuration.GetConnectionString("DefaultConnection")
+    ?? throw new InvalidOperationException("No Auth Service MySQL connection string is configured.");
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString)));
+    options.UseMySql(connectionString, new MySqlServerVersion(new Version(8, 0, 30)), mySqlOptions => mySqlOptions.EnableRetryOnFailure()));
 
 // 2. Register Token Service
 builder.Services.AddScoped<TokenService>();
 
 // 3. Configure JWT Authentication
 var jwtKey = builder.Configuration["Jwt:Key"] ?? "Exvo_Super_Secret_JWT_Key_2026_Must_Be_Long_Enough!";
-var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "ExvoAuthService";
-var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "ExvoPlatform";
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
         options.TokenValidationParameters = new TokenValidationParameters
         {
-            ValidateIssuer = true,
-            ValidateAudience = true,
+            ValidateIssuer = false,
+            ValidateAudience = false,
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
-            ValidIssuer = jwtIssuer,
-            ValidAudience = jwtAudience,
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey)),
+            ClockSkew = TimeSpan.FromMinutes(5)
         };
     });
 
@@ -49,7 +44,7 @@ builder.Services.AddAuthorization();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v1", new OpenApiInfo { Title = "Exvo Platform API", Version = "v1" });
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "Exvo Auth API", Version = "v1" });
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
         Name = "Authorization",
@@ -88,18 +83,6 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-// Automatically ensure DB tables are created / migrated
-try
-{
-    using var scope = app.Services.CreateScope();
-    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    db.Database.EnsureCreated();
-}
-catch (Exception ex)
-{
-    Console.WriteLine($"DB Initialization note: {ex.Message}");
-}
-
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -107,27 +90,48 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseCors("AllowAll");
+
 app.UseAuthentication();
 app.UseAuthorization();
 
-// Helper to get authenticated user ID from Claims
-static int? GetUserIdFromClaims(ClaimsPrincipal claimsPrincipal)
+// Auto-patch Database Schema if missing columns (e.g. Address)
+using (var scope = app.Services.CreateScope())
 {
-    var userIdClaim = claimsPrincipal.FindFirst(ClaimTypes.NameIdentifier)?.Value 
-                      ?? claimsPrincipal.FindFirst("sub")?.Value 
-                      ?? claimsPrincipal.FindFirst("nameid")?.Value;
-
-    if (string.IsNullOrEmpty(userIdClaim) || !int.TryParse(userIdClaim, out int userId))
+    try
     {
-        return null;
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        db.Database.ExecuteSqlRaw("ALTER TABLE Users ADD COLUMN Address longtext NULL;");
     }
-    return userId;
+    catch
+    {
+        // Column already exists or error ignored
+    }
 }
 
+// Helper to resolve user from ClaimsPrincipal
+static async Task<User?> GetUserFromClaimsAsync(ClaimsPrincipal claimsPrincipal, AppDbContext db)
+{
+    var userIdClaim = claimsPrincipal.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                      ?? claimsPrincipal.FindFirst("sub")?.Value
+                      ?? claimsPrincipal.FindFirst("nameid")?.Value
+                      ?? claimsPrincipal.Claims.FirstOrDefault(c => c.Type.EndsWith("nameidentifier", StringComparison.OrdinalIgnoreCase))?.Value;
 
-// ══════════════════════════════════════════════════════
-// ── AUTHENTICATION & PROFILE ENDPOINTS ──
-// ══════════════════════════════════════════════════════
+    if (!string.IsNullOrEmpty(userIdClaim) && int.TryParse(userIdClaim, out int userId))
+    {
+        var userById = await db.Users.FindAsync(userId);
+        if (userById != null) return userById;
+    }
+
+    var userEmailClaim = claimsPrincipal.FindFirst(ClaimTypes.Email)?.Value
+                         ?? claimsPrincipal.FindFirst("email")?.Value;
+
+    if (!string.IsNullOrEmpty(userEmailClaim))
+    {
+        return await db.Users.FirstOrDefaultAsync(u => u.Email == userEmailClaim);
+    }
+
+    return null;
+}
 
 // POST /api/auth/register
 app.MapPost("/api/auth/register", async (RegisterRequest request, AppDbContext db, TokenService tokenService) =>
@@ -137,39 +141,43 @@ app.MapPost("/api/auth/register", async (RegisterRequest request, AppDbContext d
         return Results.BadRequest(new { Message = "Email and password are required." });
     }
 
+    var isOrganizer = string.Equals(request.Role, "Organizer", StringComparison.OrdinalIgnoreCase) ||
+                      string.Equals(request.Role, "Company", StringComparison.OrdinalIgnoreCase) ||
+                      string.Equals(request.Role, "Business", StringComparison.OrdinalIgnoreCase) ||
+                      !string.IsNullOrWhiteSpace(request.CompanyRegNumber);
+
+    var companyName = !string.IsNullOrWhiteSpace(request.CompanyName)
+        ? request.CompanyName
+        : (isOrganizer ? request.FullName : null);
+
+    if (isOrganizer && string.IsNullOrWhiteSpace(companyName))
+    {
+        return Results.BadRequest(new { Message = "Company name is required for company registration." });
+    }
+
     var existingUser = await db.Users.FirstOrDefaultAsync(u => u.Email == request.Email);
     if (existingUser != null)
     {
-        return Results.Conflict(new { Message = "An account with this email already exists!" });
+        return Results.Conflict(new { Message = "A user with this email already exists." });
     }
 
-    var hashedPassword = BCrypt.Net.BCrypt.HashPassword(request.Password);
+    var passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
+    var resolvedRole = isOrganizer ? "Organizer" : "Attendee";
+    var resolvedName = isOrganizer ? companyName! : request.FullName;
 
     var user = new User
     {
-        FullName = request.FullName?.Trim() ?? string.Empty,
-        Email = request.Email.Trim(),
-        PasswordHash = hashedPassword,
-        Role = request.Role?.Trim() ?? "Attendee",
-        CompanyName = request.CompanyName?.Trim(),
-        CompanyRegNumber = request.CompanyRegNumber?.Trim(),
-        ContactNumber = request.ContactNumber?.Trim(),
+        FullName = resolvedName,
+        Email = request.Email,
+        PasswordHash = passwordHash,
+        Role = resolvedRole,
+        CompanyName = isOrganizer ? companyName : null,
+        CompanyRegNumber = isOrganizer ? request.CompanyRegNumber : null,
+        ContactNumber = request.ContactNumber,
         CreatedAt = DateTime.UtcNow
     };
 
     db.Users.Add(user);
-    await db.SaveChangesAsync();
-
-    var profile = new Profile
-    {
-        UserId = user.Id,
-        Name = user.FullName,
-        Email = user.Email,
-        PhoneNumber = user.ContactNumber,
-        CreatedAt = DateTime.UtcNow,
-        UpdatedAt = DateTime.UtcNow
-    };
-    db.Profiles.Add(profile);
     await db.SaveChangesAsync();
 
     var token = tokenService.GenerateToken(user);
@@ -182,10 +190,10 @@ app.MapPost("/api/auth/register", async (RegisterRequest request, AppDbContext d
         user.CompanyName,
         user.CompanyRegNumber,
         user.ContactNumber,
+        user.ProfilePicture,
         Token: token,
         Message: "Registration successful!",
-        ProfilePicture: profile.ProfilePicture,
-        Address: profile.Address
+        Address: user.Address
     ));
 })
 .WithName("Register")
@@ -205,22 +213,6 @@ app.MapPost("/api/auth/login", async (LoginRequest request, AppDbContext db, Tok
         return Results.Json(new { Message = "Invalid email or password!" }, statusCode: 401);
     }
 
-    var profile = await db.Profiles.FirstOrDefaultAsync(p => p.UserId == user.Id);
-    if (profile == null)
-    {
-        profile = new Profile
-        {
-            UserId = user.Id,
-            Name = user.FullName,
-            Email = user.Email,
-            PhoneNumber = user.ContactNumber,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
-        db.Profiles.Add(profile);
-        await db.SaveChangesAsync();
-    }
-
     var token = tokenService.GenerateToken(user);
 
     return Results.Ok(new AuthResponse(
@@ -231,138 +223,120 @@ app.MapPost("/api/auth/login", async (LoginRequest request, AppDbContext db, Tok
         user.CompanyName,
         user.CompanyRegNumber,
         user.ContactNumber,
+        user.ProfilePicture,
         Token: token,
         Message: "Login successful!",
-        ProfilePicture: profile.ProfilePicture,
-        Address: profile.Address
+        Address: user.Address
     ));
 })
 .WithName("Login")
 .WithOpenApi();
 
-// GET /api/auth/profile
-var handleGetProfile = async (ClaimsPrincipal claimsPrincipal, AppDbContext db) =>
+// GET /api/auth/me (Protected Endpoint)
+app.MapGet("/api/auth/me", async (ClaimsPrincipal claimsPrincipal, AppDbContext db) =>
 {
-    var userId = GetUserIdFromClaims(claimsPrincipal);
-    if (userId == null)
+    var user = await GetUserFromClaimsAsync(claimsPrincipal, db);
+    if (user == null)
     {
         return Results.Unauthorized();
     }
 
-    var user = await db.Users.FindAsync(userId.Value);
-    if (user == null)
+    return Results.Ok(new
     {
-        return Results.NotFound(new { Message = "User not found." });
-    }
-
-    var profile = await db.Profiles.FirstOrDefaultAsync(p => p.UserId == user.Id);
-    if (profile == null)
-    {
-        profile = new Profile
-        {
-            UserId = user.Id,
-            Name = user.FullName,
-            Email = user.Email,
-            PhoneNumber = user.ContactNumber,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
-        db.Profiles.Add(profile);
-        await db.SaveChangesAsync();
-    }
-
-    return Results.Ok(new ProfileResponse(
-        profile.Id,
         user.Id,
-        profile.Name,
-        profile.Email,
-        profile.Address,
-        profile.PhoneNumber,
-        profile.ProfilePicture,
+        user.FullName,
+        name = user.FullName,
+        user.Email,
         user.Role,
         user.CompanyName,
         user.CompanyRegNumber,
-        profile.CreatedAt,
-        profile.UpdatedAt
-    ));
-};
+        user.ContactNumber,
+        phoneNumber = user.ContactNumber,
+        user.Address,
+        user.ProfilePicture,
+        user.CreatedAt
+    });
+})
+.RequireAuthorization()
+.WithName("GetCurrentUser")
+.WithOpenApi();
 
-app.MapGet("/api/auth/profile", handleGetProfile).RequireAuthorization().WithName("GetProfile").WithOpenApi();
-app.MapGet("/api/profile", handleGetProfile).RequireAuthorization().WithName("GetProfileAlias").WithOpenApi();
-
-// PUT /api/auth/profile
-var handleUpdateProfile = async (UpdateProfileRequest request, ClaimsPrincipal claimsPrincipal, AppDbContext db) =>
+// PUT /api/auth/profile (Protected - Update profile details + photo)
+app.MapPut("/api/auth/profile", async (UpdateProfileRequest request, ClaimsPrincipal claimsPrincipal, AppDbContext db) =>
 {
-    var userId = GetUserIdFromClaims(claimsPrincipal);
-    if (userId == null)
+    var user = await GetUserFromClaimsAsync(claimsPrincipal, db);
+    if (user == null)
     {
         return Results.Unauthorized();
     }
 
-    if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Email))
+    var newName = !string.IsNullOrWhiteSpace(request.FullName) ? request.FullName : request.Name;
+    if (!string.IsNullOrWhiteSpace(newName))
     {
-        return Results.BadRequest(new { Message = "Name and Email are required." });
+        user.FullName = newName.Trim();
     }
 
-    var user = await db.Users.FindAsync(userId.Value);
-    if (user == null)
+    if (!string.IsNullOrWhiteSpace(request.Email))
     {
-        return Results.NotFound(new { Message = "User not found." });
+        user.Email = request.Email.Trim();
     }
 
-    if (!string.Equals(user.Email, request.Email, StringComparison.OrdinalIgnoreCase))
+    var newPhone = request.ContactNumber ?? request.PhoneNumber;
+    if (newPhone != null)
     {
-        var emailExists = await db.Users.AnyAsync(u => u.Email == request.Email && u.Id != user.Id);
-        if (emailExists)
-        {
-            return Results.Conflict(new { Message = "This email is already in use by another account." });
-        }
+        user.ContactNumber = newPhone.Trim();
     }
 
-    var profile = await db.Profiles.FirstOrDefaultAsync(p => p.UserId == user.Id);
-    if (profile == null)
+    if (request.Address != null)
     {
-        profile = new Profile
-        {
-            UserId = user.Id,
-            CreatedAt = DateTime.UtcNow
-        };
-        db.Profiles.Add(profile);
+        user.Address = request.Address.Trim();
     }
 
-    profile.Name = request.Name.Trim();
-    profile.Email = request.Email.Trim();
-    profile.Address = request.Address?.Trim();
-    profile.PhoneNumber = request.PhoneNumber?.Trim();
     if (request.ProfilePicture != null)
     {
-        profile.ProfilePicture = request.ProfilePicture;
+        user.ProfilePicture = request.ProfilePicture;
     }
-    profile.UpdatedAt = DateTime.UtcNow;
-
-    user.FullName = profile.Name;
-    user.Email = profile.Email;
-    user.ContactNumber = profile.PhoneNumber;
 
     await db.SaveChangesAsync();
 
-    return Results.Ok(new ProfileResponse(
-        profile.Id,
+    return Results.Ok(new
+    {
         user.Id,
-        profile.Name,
-        profile.Email,
-        profile.Address,
-        profile.PhoneNumber,
-        profile.ProfilePicture,
+        user.FullName,
+        name = user.FullName,
+        user.Email,
         user.Role,
         user.CompanyName,
         user.CompanyRegNumber,
-        profile.CreatedAt,
-        profile.UpdatedAt
-    ));
-};
+        user.ContactNumber,
+        phoneNumber = user.ContactNumber,
+        user.Address,
+        user.ProfilePicture,
+        user.CreatedAt,
+        Message = "Profile updated successfully."
+    });
+})
+.RequireAuthorization()
+.WithName("UpdateProfile")
+.WithOpenApi();
 
-app.MapPut("/api/auth/profile", handleUpdateProfile).RequireAuthorization().WithName("UpdateProfile").WithOpenApi();
-app.MapPut("/api/profile", handleUpdateProfile).RequireAuthorization().WithName("UpdateProfileAlias").WithOpenApi();
+// DELETE /api/auth/profile (Protected - Permanently Delete Account)
+app.MapDelete("/api/auth/profile", async (ClaimsPrincipal claimsPrincipal, AppDbContext db) =>
+{
+    var user = await GetUserFromClaimsAsync(claimsPrincipal, db);
+    if (user == null)
+    {
+        return Results.Unauthorized();
+    }
+
+    db.Users.Remove(user);
+    await db.SaveChangesAsync();
+
+    return Results.Ok(new { Message = "Account deleted successfully." });
+})
+.RequireAuthorization()
+.WithName("DeleteAccount")
+.WithOpenApi();
 
 app.Run();
+
