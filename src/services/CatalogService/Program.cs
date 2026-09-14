@@ -1,4 +1,4 @@
-﻿using System.Security.Claims;
+using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
@@ -12,7 +12,12 @@ var builder = WebApplication.CreateBuilder(args);
 // 1. Database Context
 var connectionString = builder.Configuration["EXVO_CATALOG_MYSQL_CONNECTION_STRING"]
     ?? builder.Configuration.GetConnectionString("DefaultConnection")
-    ?? throw new InvalidOperationException("No Catalog Service MySQL connection string is configured.");
+    ?? "Server=localhost;Port=3306;Database=exvo_catalog_db;Uid=root;Pwd=;SslMode=None;AllowPublicKeyRetrieval=True;";
+
+if (!connectionString.Contains("AllowPublicKeyRetrieval", StringComparison.OrdinalIgnoreCase))
+{
+    connectionString += ";AllowPublicKeyRetrieval=True;";
+}
 
 builder.Services.AddDbContext<CatalogDbContext>(options =>
     options.UseMySql(connectionString, new MySqlServerVersion(new Version(8, 0, 30)), mySqlOptions => mySqlOptions.EnableRetryOnFailure()));
@@ -82,7 +87,7 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-// Preserve existing IDs, seed categories, and patch DB schema for TicketTiersJson on startup.
+// Preserve existing IDs, seed categories, and patch DB schema for TicketTiersJson & IsHidder on startup.
 using (var scope = app.Services.CreateScope())
 {
     try
@@ -92,6 +97,11 @@ using (var scope = app.Services.CreateScope())
         try
         {
             db.Database.ExecuteSqlRaw("ALTER TABLE Events ADD COLUMN TicketTiersJson longtext NULL;");
+        }
+        catch { }
+        try
+        {
+            db.Database.ExecuteSqlRaw("ALTER TABLE Events ADD COLUMN IsHidder tinyint(1) NOT NULL DEFAULT 0;");
         }
         catch { }
         try
@@ -149,6 +159,9 @@ app.MapGet("/api/catalog/events", async (int? categoryId, CatalogDbContext db) =
 {
     var query = db.Events.Include(e => e.Category).AsQueryable();
 
+    // Filter out hidden events from public browsing
+    query = query.Where(e => !e.IsHidder);
+
     if (categoryId.HasValue)
     {
         query = query.Where(e => e.CategoryId == categoryId.Value);
@@ -174,7 +187,10 @@ app.MapGet("/api/catalog/events", async (int? categoryId, CatalogDbContext db) =
         CoverImage = e.ImageUrl,
         e.AvailableTickets,
         e.TicketTiersJson,
-        e.CreatedAt
+        e.CreatedAt,
+        e.IsHidder,
+        IsHidden = e.IsHidder,
+        isHidden = e.IsHidder
     });
 
     return Results.Ok(result);
@@ -224,7 +240,10 @@ app.MapGet("/api/catalog/events/my-events", async (ClaimsPrincipal claimsPrincip
         CoverImage = e.ImageUrl,
         e.AvailableTickets,
         e.TicketTiersJson,
-        e.CreatedAt
+        e.CreatedAt,
+        e.IsHidder,
+        IsHidden = e.IsHidder,
+        isHidden = e.IsHidder
     });
 
     return Results.Ok(result);
@@ -258,7 +277,10 @@ app.MapGet("/api/catalog/events/{id:int}", async (int id, CatalogDbContext db) =
         CoverImage = evt.ImageUrl,
         evt.AvailableTickets,
         evt.TicketTiersJson,
-        evt.CreatedAt
+        evt.CreatedAt,
+        evt.IsHidder,
+        IsHidden = evt.IsHidder,
+        isHidden = evt.IsHidder
     };
 
     return Results.Ok(result);
@@ -352,6 +374,9 @@ app.MapPut("/api/catalog/events/{id:int}", async (int id, Event updatedEvt, Clai
     if (updatedEvt.TicketTiersJson != null)
         evt.TicketTiersJson = updatedEvt.TicketTiersJson;
 
+    // Update IsHidder in Database
+    evt.IsHidder = updatedEvt.IsHidder;
+
     await db.SaveChangesAsync();
 
     return Results.Ok(new { Message = "Event updated successfully.", Id = id });
@@ -376,4 +401,3 @@ app.MapDelete("/api/catalog/events/{id:int}", async (int id, ClaimsPrincipal cla
 .WithOpenApi();
 
 app.Run();
-

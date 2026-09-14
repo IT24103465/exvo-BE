@@ -22,5 +22,14 @@ namespace Exvo.CatalogService.Models
         public int AvailableTickets { get; set; }
         public string? TicketTiersJson { get; set; }
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+        public bool IsHidder { get; set; } = false;
+
+        [JsonPropertyName("isHidden")]
+        public bool IsHidden
+        {
+            get => IsHidder;
+            set => IsHidder = value;
+        }
     }
 }

@@ -28,6 +28,8 @@ namespace Exvo.CatalogService.Data
                 entity.Property(e => e.Title).IsRequired().HasMaxLength(200);
                 entity.Property(e => e.OrganizerName).HasMaxLength(200);
                 entity.Property(e => e.Price).HasPrecision(18, 2);
+                entity.Property(e => e.IsHidder).HasDefaultValue(false);
+                entity.Ignore(e => e.IsHidden);
                 entity.HasOne(e => e.Category)
                       .WithMany(c => c.Events)
                       .HasForeignKey(e => e.CategoryId)
