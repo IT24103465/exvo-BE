@@ -1,7 +1,7 @@
 services:
   mysql-dev:
-    image: mysql:8.0
     profiles: ["local"]
+    image: mysql:8.0
     container_name: exvo_mysql_dev
     restart: always
     environment:

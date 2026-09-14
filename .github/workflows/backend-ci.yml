@@ -1,0 +1,342 @@
+name: Backend CI and Release Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_VERSION: "8.0.x"
+  SOLUTION: ExvoPlatform.sln
+
+jobs:
+  dependency-restore:
+    name: Dependency Restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+          cache-dependency-path: "**/*.csproj"
+      - name: Restore solution
+        run: dotnet restore "$SOLUTION"
+
+  solution-build:
+    name: Solution Build
+    needs: dependency-restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+          cache-dependency-path: "**/*.csproj"
+      - name: Restore solution assets
+        run: dotnet restore "$SOLUTION"
+      - name: Build solution
+        run: dotnet build "$SOLUTION" --configuration Release --no-restore --verbosity minimal
+
+  code-formatting:
+    name: Code Formatting
+    needs: dependency-restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+          cache-dependency-path: "**/*.csproj"
+      - name: Restore solution assets
+        run: dotnet restore "$SOLUTION"
+      - name: Verify C# formatting
+        run: dotnet format "$SOLUTION" --verify-no-changes --no-restore
+
+  unit-tests:
+    name: Unit Tests
+    needs: dependency-restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+          cache-dependency-path: "**/*.csproj"
+      - name: Restore solution assets
+        run: dotnet restore "$SOLUTION"
+      - name: Verify test projects and production references
+        shell: bash
+        run: |
+          mapfile -t test_projects < <(find tests -type f -name '*.csproj' -print | sort)
+          if [ "${#test_projects[@]}" -eq 0 ]; then
+            echo 'No test projects were found under tests/.' >&2
+            exit 1
+          fi
+          for project in "${test_projects[@]}"; do
+            echo "Test project: $project"
+            if ! grep -q '<ProjectReference' "$project"; then
+              echo "::warning file=$project::No ProjectReference is declared; this project currently does not test production code."
+            fi
+          done
+      - name: Run discovered tests
+        shell: bash
+        run: |
+          mapfile -t test_projects < <(find tests -type f -name '*.csproj' -print | sort)
+          total_tests=0
+          for project in "${test_projects[@]}"; do
+            list_file="$(mktemp)"
+            dotnet test "$project" --configuration Release --no-restore --list-tests --logger "console;verbosity=minimal" | tee "$list_file"
+            count=$(grep -E '^\s+[A-Za-z0-9_].*$' "$list_file" | grep -v -E '^(Test run|The following Tests are available|Total tests:)' | wc -l)
+            total_tests=$((total_tests + count))
+            rm -f "$list_file"
+            dotnet test "$project" --configuration Release --no-restore --logger "trx;LogFileName=$(basename "$project" .csproj).trx" --results-directory ./TestResults
+          done
+          if [ "$total_tests" -eq 0 ]; then
+            echo 'No tests were discovered under tests/.' >&2
+            exit 1
+          fi
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results-${{ github.run_id }}
+          path: TestResults/**/*.trx
+          if-no-files-found: error
+          retention-days: 14
+
+  docker-validation:
+    name: Docker Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AZURE_MYSQL_PASSWORD: ci-placeholder-password
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Validate Compose configuration
+        run: docker compose config
+      - name: Build AuthService image
+        run: docker build --file src/services/AuthService/Dockerfile --tag exvo/authservice:ci .
+      - name: Build CatalogService image
+        run: docker build --file src/services/CatalogService/Dockerfile --tag exvo/catalogservice:ci .
+      - name: Build API Gateway image
+        run: docker build --file src/gateway/ApiGateway/Dockerfile --tag exvo/apigateway:ci .
+
+  code-coverage:
+    name: Code Coverage
+    needs: dependency-restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+          cache-dependency-path: "**/*.csproj"
+      - name: Restore solution assets
+        run: dotnet restore "$SOLUTION"
+      - name: Collect XPlat coverage
+        shell: bash
+        run: |
+          mapfile -t test_projects < <(find tests -type f -name '*.csproj' -print | sort)
+          if [ "${#test_projects[@]}" -eq 0 ]; then
+            echo 'No test projects were found under tests/.' >&2
+            exit 1
+          fi
+          for project in "${test_projects[@]}"; do
+            dotnet test "$project" --configuration Release --no-restore --collect:'XPlat Code Coverage' --results-directory ./CoverageResults --logger "console;verbosity=minimal"
+          done
+          mapfile -t coverage_files < <(find CoverageResults -type f -name 'coverage.cobertura.xml' -size +0c)
+          if [ "${#coverage_files[@]}" -eq 0 ]; then
+            echo 'No coverage file was produced.' >&2
+            exit 1
+          fi
+          meaningful=0
+          for file in "${coverage_files[@]}"; do
+            if grep -q '<class ' "$file"; then meaningful=1; fi
+          done
+          if [ "$meaningful" -eq 0 ]; then
+            echo 'Coverage files were produced, but none contain instrumented classes.' >&2
+            exit 1
+          fi
+          echo "Coverage files: ${coverage_files[*]}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-coverage-${{ github.run_id }}
+          path: CoverageResults/**
+          if-no-files-found: error
+          retention-days: 14
+
+  dependency-vulnerability-scan:
+    name: Dependency Vulnerability Scan
+    needs: dependency-restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+          cache-dependency-path: "**/packages.lock.json"
+      - name: Restore solution assets
+        run: dotnet restore "$SOLUTION"
+      - name: Scan direct and transitive NuGet dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          dotnet list "$SOLUTION" package --vulnerable --include-transitive 2>&1 | tee dependency-vulnerabilities.txt
+          if grep -Eiq 'Severity:[[:space:]]*(High|Critical)' dependency-vulnerabilities.txt; then
+            echo 'High or critical NuGet vulnerabilities were found.' >&2
+            exit 1
+          fi
+      - name: Upload vulnerability report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-vulnerability-report-${{ github.run_id }}
+          path: dependency-vulnerabilities.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  api-integration-tests:
+    name: API Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Check for Postman collection and environment
+        id: postman
+        shell: bash
+        run: |
+          collection=$(find . -type f -not -path './.git/*' -not -path '*/bin/*' -not -path '*/obj/*' \( -iname '*postman*.json' -o -iname '*collection*.json' \) | head -n 1)
+          environment=$(find . -type f -not -path './.git/*' -not -path '*/bin/*' -not -path '*/obj/*' \( -iname '*postman*environment*.json' -o -iname '*environment*.json' \) | head -n 1)
+          if [ -n "$collection" ] && [ -n "$environment" ]; then
+            echo "collection=$collection" >> "$GITHUB_OUTPUT"
+            echo "environment=$environment" >> "$GITHUB_OUTPUT"
+            echo 'found=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'found=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Record missing integration-test assets
+        if: steps.postman.outputs.found != 'true'
+        run: |
+          echo 'TODO: add a Postman collection and environment before making API Integration Tests a required main-branch check.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'No Postman collection/environment exists in this repository; integration execution is intentionally skipped.'
+      - name: Set up Node.js
+        if: steps.postman.outputs.found == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Newman
+        if: steps.postman.outputs.found == 'true'
+        run: npm install --global newman@6
+      - name: Start local Compose services
+        if: steps.postman.outputs.found == 'true'
+        env:
+          AZURE_MYSQL_PASSWORD: ci-placeholder-password
+        run: docker compose up --detach --wait authservice catalogservice apigateway
+      - name: Wait for API Gateway
+        if: steps.postman.outputs.found == 'true'
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent http://localhost:5000/swagger/index.html > /dev/null; then exit 0; fi
+            sleep 2
+          done
+          echo 'API Gateway did not become ready.' >&2
+          exit 1
+      - name: Run Postman collection
+        if: steps.postman.outputs.found == 'true'
+        run: newman run "${{ steps.postman.outputs.collection }}" --environment "${{ steps.postman.outputs.environment }}" --reporters cli,junit --reporter-junit-export newman-results.xml
+      - name: Upload Newman results
+        if: always() && steps.postman.outputs.found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-integration-results-${{ github.run_id }}
+          path: newman-results.xml
+          if-no-files-found: error
+          retention-days: 14
+      - name: Stop local Compose services
+        if: always() && steps.postman.outputs.found == 'true'
+        env:
+          AZURE_MYSQL_PASSWORD: ci-placeholder-password
+        run: docker compose down --volumes
+
+  security-analysis:
+    name: Security Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+          build-mode: autobuild
+      - name: Analyze with CodeQL
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:csharp
+
+  release-gate:
+    name: Release Gate
+    needs:
+      - dependency-restore
+      - solution-build
+      - code-formatting
+      - unit-tests
+      - docker-validation
+      - code-coverage
+      - dependency-vulnerability-scan
+      - api-integration-tests
+      - security-analysis
+    if: >-
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Confirm all validation checks passed
+        run: |
+          echo 'All nine backend validation checks passed.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Deployment is intentionally not configured: no target platform or credentials were specified.' >> "$GITHUB_STEP_SUMMARY"
+      # TODO: connect the approved deployment job here after its platform and credentials are specified.
