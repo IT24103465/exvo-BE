@@ -6,6 +6,7 @@ on:
     branches:
       - devops/azure-catalog-gateway-deployment
     paths:
+      - 'src/services/AuthService/**'
       - 'src/services/CatalogService/**'
       - 'src/gateway/ApiGateway/**'
       - '.github/workflows/backend-images.yml'
@@ -31,6 +32,19 @@ jobs:
           registry: ${{ secrets.ACR_LOGIN_SERVER }}
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push Auth Service
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: src/services/AuthService/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/exvo-auth:staging
+            ${{ secrets.ACR_LOGIN_SERVER }}/exvo-auth:${{ github.sha }}
+          cache-from: type=gha,scope=exvo-auth
+          cache-to: type=gha,mode=max,scope=exvo-auth
 
       - name: Build and push Catalog Service
         uses: docker/build-push-action@v7

@@ -94,6 +94,9 @@ app.UseCors("AllowAll");
 app.UseAuthentication();
 app.UseAuthorization();
 
+app.MapGet("/health", () => Results.Ok(new { service = "AuthService", status = "healthy" }))
+    .AllowAnonymous();
+
 // Auto-patch Database Schema if missing columns (e.g. Address)
 using (var scope = app.Services.CreateScope())
 {
