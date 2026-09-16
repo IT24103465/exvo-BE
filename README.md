@@ -254,7 +254,49 @@ The test projects use xUnit for automated verification.
 
 The checked-in MySQL connection strings are local Docker development fallbacks. `EXVO_AUTH_MYSQL_CONNECTION_STRING` and `EXVO_CATALOG_MYSQL_CONNECTION_STRING` override them independently, so the Auth service uses only `exvo_auth_db` and the Event Catalog service uses only `exvo_catalog_db`. Azure connection strings must include `SslMode=Required`.
 
-The root `docker-compose.yml` starts only the local MySQL fallback; it does not define backend application containers. If backend containers are added later, pass the same two service-specific variables into the corresponding container environments. Do not add the Azure password to Compose files or committed configuration.
+The root `docker-compose.yml` defines backend containers and a local MySQL fallback
+under the `local` profile. Backend containers use Development configuration, including
+the gateway's localhost CORS origins. Compose requires `AZURE_MYSQL_PASSWORD` from
+the shell or an ignored environment file. Never commit Azure secrets.
+
+### Azure Container Apps: Gateway and Catalog
+
+Both Dockerfiles use .NET 8 and listen on container port `8080`. Build from this
+backend repository root and configure Container Apps ingress to target port `8080`.
+Set `ASPNETCORE_ENVIRONMENT=Production` for both applications.
+
+Configure these environment variables on the indicated Container App:
+
+| Application | Variable | Value |
+| --- | --- | --- |
+| Gateway | `Cors__AllowedOrigins__0` | `https://<frontend-name>.azurestaticapps.net` |
+| Gateway | `ReverseProxy__Clusters__catalog-cluster__Destinations__catalogServiceDestination__Address` | `http://exvo-catalog` |
+| Catalog | `EXVO_CATALOG_MYSQL_CONNECTION_STRING` | Secret reference containing `Server=<mysql-host>;Port=3306;Database=exvo_catalog_db;User ID=<mysql-user>;Password=<mysql-password>;SslMode=Required;` |
+
+Specify the frontend origin exactly (scheme and hostname, normally without a
+trailing slash or path). Additional origins use indices `__1`, `__2`, and so on.
+Production startup fails if no nonempty origin is configured. Localhost origins
+are supplied only by Development settings; Production does not add them automatically.
+Credentialed CORS requires explicit origins, not `*`.
+
+Store the actual database connection string in an Azure Container App secret and
+reference it from the Catalog environment variable. Keep `SslMode=Required`.
+Do not commit real connection strings, passwords, tokens, or environment files.
+The YARP destination remains configurable; Compose retains `http://catalogservice:8080`.
+
+Anonymous liveness endpoints return HTTP 200 with the service name and
+`status: healthy`, without querying MySQL or downstream services:
+
+- Gateway: `http://localhost:5000/health`
+- Catalog: `http://localhost:5255/health`
+
+These are liveness checks, not database readiness checks. Catalog's existing
+database seeding runs before the HTTP listener starts and can delay initial startup
+when MySQL is unavailable; subsequent health requests do not access the database.
+For a focused Compose smoke test with existing safe database settings, use
+`docker compose --env-file .env.local up --build -d --no-deps catalogservice apigateway`
+to avoid starting the existing Auth/Kafka dependencies, then check both health URLs
+and `http://localhost:5000/api/catalog/events`.
 
 ### Inspecting Profile Pictures in MySQL Shell
 
