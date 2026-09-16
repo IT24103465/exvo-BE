@@ -1,0 +1,59 @@
+name: Build Backend Container Images
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - devops/azure-catalog-gateway-deployment
+    paths:
+      - 'src/services/CatalogService/**'
+      - 'src/gateway/ApiGateway/**'
+      - '.github/workflows/backend-images.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    name: Build and push backend images
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push Catalog Service
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: src/services/CatalogService/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/exvo-catalog:staging
+            ${{ secrets.ACR_LOGIN_SERVER }}/exvo-catalog:${{ github.sha }}
+          cache-from: type=gha,scope=exvo-catalog
+          cache-to: type=gha,mode=max,scope=exvo-catalog
+
+      - name: Build and push API Gateway
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: src/gateway/ApiGateway/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/exvo-gateway:staging
+            ${{ secrets.ACR_LOGIN_SERVER }}/exvo-gateway:${{ github.sha }}
+          cache-from: type=gha,scope=exvo-gateway
+          cache-to: type=gha,mode=max,scope=exvo-gateway
