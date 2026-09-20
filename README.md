@@ -156,6 +156,14 @@ Concert, Festival, Live Session, DJ Night, Acoustic, Stand-Up, and EDM Arena.
 Existing categories and their IDs are preserved. Apply database migrations before
 starting the service. Categories are available at `GET /api/catalog/categories`.
 
+Catalog automatically excludes events whose scheduled start time has passed from
+public browsing, organizer lists, and event detail requests. Records are retained.
+On startup, its additive schema upgrade adds the nullable `Events.UtcOffsetMinutes`
+column if needed. New and edited events retain the supplied offset; existing rows
+with no offset are interpreted as Sri Lanka time (UTC+05:30). The API also returns
+`startsAtUtc` so open frontend pages can remove events at the same cutoff regardless
+of the viewer's timezone. There is currently no separate event end time.
+
 Start the gateway in another terminal:
 
 ```powershell
