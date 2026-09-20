@@ -65,6 +65,7 @@ public class CatalogFactory : WebApplicationFactory<Program>
         using var scope = Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
         db.Categories.Add(new Category { Id = 1, Name = "Concert" });
+        db.Categories.Add(new Category { Id = 2, Name = "Festival" });
         db.Events.AddRange(
             new Event { Id = 1, OrganizerId = 11, OrganizerName = "Shared company", Title = "Mine", CategoryId = 1, EventDate = new DateTime(2099, 1, 1), UtcOffsetMinutes = 0 },
             new Event { Id = 2, OrganizerId = 22, OrganizerName = "Shared company", Title = "Other", CategoryId = 1, EventDate = new DateTime(2099, 1, 1), UtcOffsetMinutes = 0 },
@@ -164,6 +165,45 @@ public class EventApiTests
         Assert.Equal(330, updated.UtcOffsetMinutes);
         Assert.Equal(11, updated.OrganizerId);
         Assert.Equal(HttpStatusCode.OK, (await client.DeleteAsync("/api/catalog/events/1")).StatusCode);
+    }
+
+    [Fact]
+    public async Task CreateAndUpdatePersistArtistAndResolveCategoryName()
+    {
+        await using var factory = new CatalogFactory();
+        using var client = factory.Client();
+        await factory.Seed();
+        var date = new DateTime(2099, 8, 12, 23, 45, 0);
+
+        var created = await client.PostAsJsonAsync("/api/catalog/events", new
+        {
+            title = "Festival night",
+            eventDate = date,
+            utcOffsetMinutes = 330,
+            categoryName = "Festival",
+            artistOrOrganizer = "The Signal",
+            venue = "Colombo"
+        });
+
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        var createdEvent = await created.Content.ReadFromJsonAsync<Event>();
+        Assert.Equal("The Signal", createdEvent!.ArtistOrOrganizer);
+        Assert.Equal(2, createdEvent.CategoryId);
+
+        var updated = await client.PutAsJsonAsync("/api/catalog/events/1", new
+        {
+            title = "Mine",
+            eventDate = date,
+            utcOffsetMinutes = 330,
+            categoryName = "Festival",
+            artistOrOrganizer = "Updated Artist",
+            venue = "Colombo"
+        });
+
+        Assert.Equal(HttpStatusCode.OK, updated.StatusCode);
+        var eventAfterUpdate = await client.GetFromJsonAsync<Event>("/api/catalog/events/1");
+        Assert.Equal("Updated Artist", eventAfterUpdate!.ArtistOrOrganizer);
+        Assert.Equal(2, eventAfterUpdate.CategoryId);
     }
 
     [Theory]

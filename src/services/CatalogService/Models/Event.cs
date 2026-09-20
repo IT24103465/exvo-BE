@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace Exvo.CatalogService.Models
 {
@@ -14,11 +15,15 @@ namespace Exvo.CatalogService.Models
         public int? UtcOffsetMinutes { get; set; }
         public int CategoryId { get; set; }
 
+        [NotMapped]
+        public string? CategoryName { get; set; }
+
         [JsonIgnore]
         public Category? Category { get; set; }
 
         public int OrganizerId { get; set; }
         public string? OrganizerName { get; set; }
+        public string? ArtistOrOrganizer { get; set; }
         public string? ImageUrl { get; set; }
         public int AvailableTickets { get; set; }
         public string? TicketTiersJson { get; set; }

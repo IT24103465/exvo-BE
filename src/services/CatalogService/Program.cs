@@ -122,6 +122,11 @@ if (!app.Environment.IsEnvironment("Testing"))
             catch { }
             try
             {
+                db.Database.ExecuteSqlRaw("ALTER TABLE Events ADD COLUMN ArtistOrOrganizer varchar(200) NULL;");
+            }
+            catch { }
+            try
+            {
                 db.Database.ExecuteSqlRaw("UPDATE Events SET EventDate = STR_TO_DATE(LEFT(EventDate, 19), '%Y-%m-%dT%H:%i:%s') WHERE EventDate LIKE '%T%';");
             }
             catch { }
@@ -205,6 +210,7 @@ app.MapGet("/api/catalog/events", async (int? categoryId, CatalogDbContext db, T
         Category = e.Category != null ? e.Category.Name : "Music & Concerts",
         e.OrganizerId,
         e.OrganizerName,
+        e.ArtistOrOrganizer,
         e.ImageUrl,
         CoverImage = e.ImageUrl,
         e.AvailableTickets,
@@ -246,6 +252,7 @@ app.MapGet("/api/catalog/events/my-events", async (ClaimsPrincipal claimsPrincip
         Category = e.Category != null ? e.Category.Name : "Music & Concerts",
         e.OrganizerId,
         e.OrganizerName,
+        e.ArtistOrOrganizer,
         e.ImageUrl,
         CoverImage = e.ImageUrl,
         e.AvailableTickets,
@@ -290,6 +297,7 @@ app.MapGet("/api/catalog/events/{id:int}", async (int id, ClaimsPrincipal user, 
         Category = evt.Category != null ? evt.Category.Name : "Music & Concerts",
         evt.OrganizerId,
         evt.OrganizerName,
+        evt.ArtistOrOrganizer,
         evt.ImageUrl,
         CoverImage = evt.ImageUrl,
         evt.AvailableTickets,
@@ -337,11 +345,12 @@ app.MapPost("/api/catalog/events", async (ClaimsPrincipal claimsPrincipal, Event
         }
     }
 
-    var categoryExists = await db.Categories.AnyAsync(c => c.Id == evt.CategoryId);
-    if (!categoryExists)
+    if (string.IsNullOrWhiteSpace(evt.ArtistOrOrganizer))
     {
-        evt.CategoryId = 1;
+        evt.ArtistOrOrganizer = evt.OrganizerName;
     }
+
+    evt.CategoryId = await CategoryResolver.ResolveCategoryIdAsync(db, evt.CategoryId, evt.CategoryName);
 
     db.Events.Add(evt);
     await db.SaveChangesAsync();
@@ -383,11 +392,13 @@ app.MapPut("/api/catalog/events/{id:int}", async (int id, Event updatedEvt, Clai
     if (updatedEvt.Price > 0)
         evt.Price = updatedEvt.Price;
 
-    if (updatedEvt.CategoryId > 0)
-        evt.CategoryId = updatedEvt.CategoryId;
+    evt.CategoryId = await CategoryResolver.ResolveCategoryIdAsync(db, updatedEvt.CategoryId, updatedEvt.CategoryName, evt.CategoryId);
 
     if (!string.IsNullOrWhiteSpace(updatedEvt.OrganizerName))
         evt.OrganizerName = updatedEvt.OrganizerName;
+
+    if (!string.IsNullOrWhiteSpace(updatedEvt.ArtistOrOrganizer))
+        evt.ArtistOrOrganizer = updatedEvt.ArtistOrOrganizer;
 
     if (!string.IsNullOrWhiteSpace(updatedEvt.ImageUrl))
         evt.ImageUrl = updatedEvt.ImageUrl;
@@ -445,6 +456,32 @@ app.MapDelete("/api/catalog/events/{id:int}", async (int id, ClaimsPrincipal cla
 .WithOpenApi();
 
 app.Run();
+
+public static class CategoryResolver
+{
+    public static async Task<int> ResolveCategoryIdAsync(CatalogDbContext db, int requestedCategoryId, string? requestedCategoryName, int fallbackCategoryId = 1)
+    {
+        if (!string.IsNullOrWhiteSpace(requestedCategoryName))
+        {
+            var normalizedName = requestedCategoryName.Trim();
+            var matchedCategory = await db.Categories
+                .AsNoTracking()
+                .FirstOrDefaultAsync(c => c.Name.ToLower() == normalizedName.ToLower());
+
+            if (matchedCategory is not null)
+            {
+                return matchedCategory.Id;
+            }
+        }
+
+        if (requestedCategoryId > 0 && await db.Categories.AnyAsync(c => c.Id == requestedCategoryId))
+        {
+            return requestedCategoryId;
+        }
+
+        return await db.Categories.AnyAsync(c => c.Id == fallbackCategoryId) ? fallbackCategoryId : 1;
+    }
+}
 
 public partial class Program { }
 

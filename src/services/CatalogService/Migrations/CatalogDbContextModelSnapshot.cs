@@ -57,6 +57,10 @@ namespace Exvo.CatalogService.Migrations
                     b.Property<int>("AvailableTickets")
                         .HasColumnType("int");
 
+                    b.Property<string>("ArtistOrOrganizer")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
                     b.Property<int>("CategoryId")
                         .HasColumnType("int");
 
