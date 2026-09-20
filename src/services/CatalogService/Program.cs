@@ -128,6 +128,9 @@ app.UseCors("AllowAll");
 app.UseAuthentication();
 app.UseAuthorization();
 
+app.MapGet("/health", () => Results.Ok(new { service = "CatalogService", status = "healthy" }))
+    .AllowAnonymous();
+
 // --- PUBLIC CATEGORIES API ---
 
 app.MapGet("/api/catalog/categories", async (CatalogDbContext db) =>
@@ -189,8 +192,7 @@ app.MapGet("/api/catalog/events", async (int? categoryId, CatalogDbContext db) =
         e.TicketTiersJson,
         e.CreatedAt,
         e.IsHidder,
-        IsHidden = e.IsHidder,
-        isHidden = e.IsHidder
+        IsHidden = e.IsHidder
     });
 
     return Results.Ok(result);
@@ -242,8 +244,7 @@ app.MapGet("/api/catalog/events/my-events", async (ClaimsPrincipal claimsPrincip
         e.TicketTiersJson,
         e.CreatedAt,
         e.IsHidder,
-        IsHidden = e.IsHidder,
-        isHidden = e.IsHidder
+        IsHidden = e.IsHidder
     });
 
     return Results.Ok(result);
@@ -279,8 +280,7 @@ app.MapGet("/api/catalog/events/{id:int}", async (int id, CatalogDbContext db) =
         evt.TicketTiersJson,
         evt.CreatedAt,
         evt.IsHidder,
-        IsHidden = evt.IsHidder,
-        isHidden = evt.IsHidder
+        IsHidden = evt.IsHidder
     };
 
     return Results.Ok(result);
