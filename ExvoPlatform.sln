@@ -31,6 +31,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Exvo.BookingService.Tests",
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ExvoAuthService", "src\services\AuthService\ExvoAuthService.csproj", "{F23BB14D-4462-49B6-8F09-731C8D28A64D}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Exvo.CatalogService.Tests", "tests\CatalogService.Tests\Exvo.CatalogService.Tests.csproj", "{1C639ECA-653D-4F32-9246-5CB2F262F4BE}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -40,6 +42,10 @@ Global
 		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1C639ECA-653D-4F32-9246-5CB2F262F4BE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1C639ECA-653D-4F32-9246-5CB2F262F4BE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1C639ECA-653D-4F32-9246-5CB2F262F4BE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1C639ECA-653D-4F32-9246-5CB2F262F4BE}.Release|Any CPU.Build.0 = Release|Any CPU
 		{85C337F9-C109-4556-AB18-3F6DF45CAE07}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{85C337F9-C109-4556-AB18-3F6DF45CAE07}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{85C337F9-C109-4556-AB18-3F6DF45CAE07}.Release|Any CPU.ActiveCfg = Release|Any CPU
@@ -78,6 +84,7 @@ Global
 		{F23BB14D-4462-49B6-8F09-731C8D28A64D}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
+		{1C639ECA-653D-4F32-9246-5CB2F262F4BE} = {F213A96B-555C-4112-BF77-E096FECF9B0D}
 		{8359AAC1-CFC2-4158-BD4B-AE447ABF0778} = {B8CED453-F73B-45C0-8C02-585A262A2CDA}
 		{85C337F9-C109-4556-AB18-3F6DF45CAE07} = {8359AAC1-CFC2-4158-BD4B-AE447ABF0778}
 		{4B76CB0A-2080-4AC7-BA4A-C0020B530C21} = {B8CED453-F73B-45C0-8C02-585A262A2CDA}

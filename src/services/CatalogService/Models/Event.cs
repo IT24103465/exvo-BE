@@ -11,6 +11,7 @@ namespace Exvo.CatalogService.Models
         public string? Venue { get; set; }
         public decimal Price { get; set; }
         public DateTime EventDate { get; set; }
+        public int? UtcOffsetMinutes { get; set; }
         public int CategoryId { get; set; }
 
         [JsonIgnore]

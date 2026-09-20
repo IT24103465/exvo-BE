@@ -1,3 +1,4 @@
+using Exvo.CatalogService;
 using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -6,6 +7,7 @@ using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using Exvo.CatalogService.Data;
 using Exvo.CatalogService.Models;
+using MySqlConnector;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -21,6 +23,9 @@ if (!connectionString.Contains("AllowPublicKeyRetrieval", StringComparison.Ordin
 
 builder.Services.AddDbContext<CatalogDbContext>(options =>
     options.UseMySql(connectionString, new MySqlServerVersion(new Version(8, 0, 30)), mySqlOptions => mySqlOptions.EnableRetryOnFailure()));
+builder.Services.AddSingleton(TimeProvider.System);
+if (!builder.Environment.IsEnvironment("Testing"))
+    builder.Services.AddHostedService<ExpiredEventVisibilityWorker>();
 
 // 2. JWT Authentication Setup
 var jwtKey = builder.Configuration["Jwt:Key"] ?? "Exvo_Super_Secret_JWT_Key_2026_Must_Be_Long_Enough!";
@@ -32,8 +37,8 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     {
         options.TokenValidationParameters = new TokenValidationParameters
         {
-            ValidateIssuer = false,
-            ValidateAudience = false,
+            ValidateIssuer = true,
+            ValidateAudience = true,
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
             ValidIssuer = jwtIssuer,
@@ -42,7 +47,10 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         };
     });
 
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("Organizer", policy => policy.RequireAuthenticatedUser().RequireRole("Organizer", "Company"));
+});
 
 // 3. Swagger / OpenAPI with Bearer Auth
 builder.Services.AddEndpointsApiExplorer();
@@ -88,35 +96,43 @@ builder.Services.AddCors(options =>
 var app = builder.Build();
 
 // Preserve existing IDs, seed categories, and patch DB schema for TicketTiersJson & IsHidder on startup.
-using (var scope = app.Services.CreateScope())
-{
-    try
+if (!app.Environment.IsEnvironment("Testing"))
+    using (var scope = app.Services.CreateScope())
     {
-        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
-        await CategorySeeder.SeedAsync(db);
         try
         {
-            db.Database.ExecuteSqlRaw("ALTER TABLE Events ADD COLUMN TicketTiersJson longtext NULL;");
-        }
-        catch { }
-        try
-        {
-            db.Database.ExecuteSqlRaw("ALTER TABLE Events ADD COLUMN IsHidder tinyint(1) NOT NULL DEFAULT 0;");
-        }
-        catch { }
-        try
-        {
-            db.Database.ExecuteSqlRaw("UPDATE Events SET EventDate = STR_TO_DATE(LEFT(EventDate, 19), '%Y-%m-%dT%H:%i:%s') WHERE EventDate LIKE '%T%';");
-        }
-        catch { }
-        try
-        {
-            db.Database.ExecuteSqlRaw("UPDATE Events SET CreatedAt = NOW() WHERE CreatedAt LIKE '%T%';");
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await CategorySeeder.SeedAsync(db);
+            // Additive upgrade, matching the existing startup schema upgrades. Null preserves
+            // old records and lets EventSchedule apply the agreed Sri Lanka offset.
+            try
+            {
+                await db.Database.ExecuteSqlRawAsync("ALTER TABLE Events ADD COLUMN UtcOffsetMinutes int NULL;");
+            }
+            catch (MySqlException ex) when (ex.Number == 1060) { } // Column already exists.
+            try
+            {
+                db.Database.ExecuteSqlRaw("ALTER TABLE Events ADD COLUMN TicketTiersJson longtext NULL;");
+            }
+            catch { }
+            try
+            {
+                db.Database.ExecuteSqlRaw("ALTER TABLE Events ADD COLUMN IsHidder tinyint(1) NOT NULL DEFAULT 0;");
+            }
+            catch { }
+            try
+            {
+                db.Database.ExecuteSqlRaw("UPDATE Events SET EventDate = STR_TO_DATE(LEFT(EventDate, 19), '%Y-%m-%dT%H:%i:%s') WHERE EventDate LIKE '%T%';");
+            }
+            catch { }
+            try
+            {
+                db.Database.ExecuteSqlRaw("UPDATE Events SET CreatedAt = NOW() WHERE CreatedAt LIKE '%T%';");
+            }
+            catch { }
         }
         catch { }
     }
-    catch { }
-}
 
 if (app.Environment.IsDevelopment())
 {
@@ -158,9 +174,10 @@ app.MapPost("/api/catalog/categories", async (Category category, CatalogDbContex
 
 // --- PUBLIC EVENTS SEARCH / BROWSING API ---
 
-app.MapGet("/api/catalog/events", async (int? categoryId, CatalogDbContext db) =>
+app.MapGet("/api/catalog/events", async (int? categoryId, CatalogDbContext db, TimeProvider clock) =>
 {
-    var query = db.Events.Include(e => e.Category).AsQueryable();
+    await EventSchedule.HideExpiredAsync(db, clock.GetUtcNow().UtcDateTime);
+    var query = EventSchedule.Upcoming(db.Events.Include(e => e.Category), clock.GetUtcNow().UtcDateTime);
 
     // Filter out hidden events from public browsing
     query = query.Where(e => !e.IsHidder);
@@ -181,6 +198,8 @@ app.MapGet("/api/catalog/events", async (int? categoryId, CatalogDbContext db) =
         e.Venue,
         e.Price,
         e.EventDate,
+        e.UtcOffsetMinutes,
+        StartsAtUtc = EventSchedule.StartsAtUtc(e),
         e.CategoryId,
         CategoryName = e.Category != null ? e.Category.Name : "Music & Concerts",
         Category = e.Category != null ? e.Category.Name : "Music & Concerts",
@@ -200,27 +219,14 @@ app.MapGet("/api/catalog/events", async (int? categoryId, CatalogDbContext db) =
 .WithName("GetEvents")
 .WithOpenApi();
 
-app.MapGet("/api/catalog/events/my-events", async (ClaimsPrincipal claimsPrincipal, CatalogDbContext db) =>
+app.MapGet("/api/catalog/events/my-events", async (ClaimsPrincipal claimsPrincipal, CatalogDbContext db, TimeProvider clock) =>
 {
-    var userIdClaim = claimsPrincipal.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                      ?? claimsPrincipal.FindFirst("sub")?.Value;
+    var organizerId = EventAccess.OrganizerId(claimsPrincipal);
+    if (organizerId is null) return Results.Forbid();
 
-    int.TryParse(userIdClaim, out int organizerId);
-
-    var nameClaim = claimsPrincipal.FindFirst(ClaimTypes.Name)?.Value
-                    ?? claimsPrincipal.FindFirst("name")?.Value
-                    ?? claimsPrincipal.FindFirst("companyName")?.Value;
-
-    var query = db.Events.Include(e => e.Category).AsQueryable();
-
-    if (organizerId > 0)
-    {
-        query = query.Where(e => e.OrganizerId == organizerId);
-    }
-    else if (!string.IsNullOrWhiteSpace(nameClaim))
-    {
-        query = query.Where(e => e.OrganizerName == nameClaim);
-    }
+    await EventSchedule.HideExpiredAsync(db, clock.GetUtcNow().UtcDateTime);
+    var query = db.Events.Include(e => e.Category)
+        .Where(e => e.OrganizerId == organizerId.Value);
 
     var events = await query.ToListAsync();
 
@@ -233,6 +239,8 @@ app.MapGet("/api/catalog/events/my-events", async (ClaimsPrincipal claimsPrincip
         e.Venue,
         e.Price,
         e.EventDate,
+        e.UtcOffsetMinutes,
+        StartsAtUtc = EventSchedule.StartsAtUtc(e),
         e.CategoryId,
         CategoryName = e.Category != null ? e.Category.Name : "Music & Concerts",
         Category = e.Category != null ? e.Category.Name : "Music & Concerts",
@@ -249,16 +257,22 @@ app.MapGet("/api/catalog/events/my-events", async (ClaimsPrincipal claimsPrincip
 
     return Results.Ok(result);
 })
+.RequireAuthorization("Organizer")
 .WithName("GetMyEvents")
 .WithOpenApi();
 
-app.MapGet("/api/catalog/events/{id:int}", async (int id, CatalogDbContext db) =>
+app.MapGet("/api/catalog/events/{id:int}", async (int id, ClaimsPrincipal user, CatalogDbContext db, TimeProvider clock) =>
 {
-    var evt = await db.Events.Include(e => e.Category).FirstOrDefaultAsync(e => e.Id == id);
+    await EventSchedule.HideExpiredAsync(db, clock.GetUtcNow().UtcDateTime);
+    var evt = await EventSchedule.Upcoming(db.Events.Include(e => e.Category), clock.GetUtcNow().UtcDateTime)
+        .FirstOrDefaultAsync(e => e.Id == id);
     if (evt == null)
     {
         return Results.NotFound(new { Message = "Event not found." });
     }
+
+    if (evt.IsHidder && evt.OrganizerId != EventAccess.OrganizerId(user))
+        return Results.NotFound(new { Message = "Event not found." });
 
     var result = new
     {
@@ -269,6 +283,8 @@ app.MapGet("/api/catalog/events/{id:int}", async (int id, CatalogDbContext db) =
         evt.Venue,
         evt.Price,
         evt.EventDate,
+        evt.UtcOffsetMinutes,
+        StartsAtUtc = EventSchedule.StartsAtUtc(evt),
         evt.CategoryId,
         CategoryName = evt.Category != null ? evt.Category.Name : "Music & Concerts",
         Category = evt.Category != null ? evt.Category.Name : "Music & Concerts",
@@ -297,13 +313,13 @@ app.MapPost("/api/catalog/events", async (ClaimsPrincipal claimsPrincipal, Event
         return Results.BadRequest(new { Message = "Event title is required." });
     }
 
-    var userIdClaim = claimsPrincipal.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                      ?? claimsPrincipal.FindFirst("sub")?.Value;
+    var organizerId = EventAccess.OrganizerId(claimsPrincipal);
+    if (organizerId is null) return Results.Forbid();
+    evt.OrganizerId = organizerId.Value;
+    evt.Id = 0;
 
-    if (int.TryParse(userIdClaim, out int organizerId) && organizerId > 0)
-    {
-        evt.OrganizerId = organizerId;
-    }
+    var scheduleError = EventAccess.ValidateSchedule(evt.EventDate, evt.UtcOffsetMinutes, DateTimeOffset.UtcNow);
+    if (scheduleError is not null) return Results.BadRequest(new { Message = scheduleError });
 
     if (string.IsNullOrWhiteSpace(evt.OrganizerName))
     {
@@ -332,17 +348,25 @@ app.MapPost("/api/catalog/events", async (ClaimsPrincipal claimsPrincipal, Event
 
     return Results.Created($"/api/catalog/events/{evt.Id}", evt);
 })
+.RequireAuthorization("Organizer")
 .WithOpenApi();
 
 // --- EVENT UPDATE API ---
 
 app.MapPut("/api/catalog/events/{id:int}", async (int id, Event updatedEvt, ClaimsPrincipal claimsPrincipal, CatalogDbContext db) =>
 {
-    var evt = await db.Events.FindAsync(id);
+    var organizerId = EventAccess.OrganizerId(claimsPrincipal);
+    if (organizerId is null) return Results.Forbid();
+    var evt = await db.Events.FirstOrDefaultAsync(e => e.Id == id && e.OrganizerId == organizerId.Value);
     if (evt == null)
     {
         return Results.NotFound(new { Message = "Event not found." });
     }
+
+    var scheduleError = EventAccess.ValidateSchedule(updatedEvt.EventDate, updatedEvt.UtcOffsetMinutes, DateTimeOffset.UtcNow);
+    if (scheduleError is not null) return Results.BadRequest(new { Message = scheduleError });
+    evt.EventDate = updatedEvt.EventDate;
+    evt.UtcOffsetMinutes = updatedEvt.UtcOffsetMinutes;
 
     if (!string.IsNullOrWhiteSpace(updatedEvt.Title))
         evt.Title = updatedEvt.Title;
@@ -381,13 +405,32 @@ app.MapPut("/api/catalog/events/{id:int}", async (int id, Event updatedEvt, Clai
 
     return Results.Ok(new { Message = "Event updated successfully.", Id = id });
 })
+.RequireAuthorization("Organizer")
+.WithOpenApi();
+
+// Visibility does not change the schedule, so past events can still be hidden.
+app.MapPatch("/api/catalog/events/{id:int}/visibility", async (int id, EventVisibility request, ClaimsPrincipal user, CatalogDbContext db, TimeProvider clock) =>
+{
+    var organizerId = EventAccess.OrganizerId(user);
+    if (organizerId is null) return Results.Forbid();
+    var evt = await db.Events.FirstOrDefaultAsync(e => e.Id == id && e.OrganizerId == organizerId.Value);
+    if (evt is null) return Results.NotFound(new { Message = "Event not found." });
+    if (!request.IsHidden && !await EventSchedule.Upcoming(db.Events, clock.GetUtcNow().UtcDateTime).AnyAsync(e => e.Id == id))
+        return Results.BadRequest(new { Message = "Past events cannot be made visible. Please choose a future event date and time." });
+    evt.IsHidder = request.IsHidden;
+    await db.SaveChangesAsync();
+    return Results.NoContent();
+})
+.RequireAuthorization("Organizer")
 .WithOpenApi();
 
 // --- EVENT DELETION API ---
 
 app.MapDelete("/api/catalog/events/{id:int}", async (int id, ClaimsPrincipal claimsPrincipal, CatalogDbContext db) =>
 {
-    var evt = await db.Events.FindAsync(id);
+    var organizerId = EventAccess.OrganizerId(claimsPrincipal);
+    if (organizerId is null) return Results.Forbid();
+    var evt = await db.Events.FirstOrDefaultAsync(e => e.Id == id && e.OrganizerId == organizerId.Value);
     if (evt == null)
     {
         return Results.NotFound(new { Message = "Event not found." });
@@ -398,6 +441,11 @@ app.MapDelete("/api/catalog/events/{id:int}", async (int id, ClaimsPrincipal cla
 
     return Results.Ok(new { Message = "Event deleted successfully.", Id = id });
 })
+.RequireAuthorization("Organizer")
 .WithOpenApi();
 
 app.Run();
+
+public partial class Program { }
+
+public record EventVisibility(bool IsHidden);
