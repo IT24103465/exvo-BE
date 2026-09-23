@@ -152,6 +152,18 @@ app.UseAuthorization();
 app.MapGet("/health", () => Results.Ok(new { service = "CatalogService", status = "healthy" }))
     .AllowAnonymous();
 
+app.MapGet("/api/catalog/events/{id:int}/ownership", async (int id, ClaimsPrincipal user, CatalogDbContext db) =>
+{
+    var organizerId = EventAccess.OrganizerId(user);
+    if (organizerId is null) return Results.Forbid();
+    return await db.Events.AnyAsync(evt => evt.Id == id && evt.OrganizerId == organizerId.Value)
+        ? Results.Ok(new { eventId = id, organizerId })
+        : Results.NotFound(new { Message = "Event not found." });
+})
+.RequireAuthorization("Organizer")
+.WithName("CheckEventOwnership")
+.WithOpenApi();
+
 // --- PUBLIC CATEGORIES API ---
 
 app.MapGet("/api/catalog/categories", async (CatalogDbContext db) =>

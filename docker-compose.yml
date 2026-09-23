@@ -75,6 +75,47 @@ services:
     ports:
       - "5255:8080"
 
+  bookingservice:
+    build:
+      context: .
+      dockerfile: src/services/BookingService/Dockerfile
+    container_name: exvo_bookingservice
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      EXVO_BOOKING_MYSQL_CONNECTION_STRING: "Server=bookingdb;Port=3306;Database=exvo_booking_db;User=bookinguser;Password=${AZURE_MYSQL_PASSWORD:?Set AZURE_MYSQL_PASSWORD in .env.local or the shell};SslMode=None"
+      CatalogService__BaseUrl: http://catalogservice:8080
+    depends_on:
+      bookingdb:
+        condition: service_healthy
+    ports:
+      - "5266:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  bookingdb:
+    image: mysql:8.0
+    container_name: exvo_bookingdb
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "${AZURE_MYSQL_PASSWORD:?Set AZURE_MYSQL_PASSWORD in .env.local or the shell}"
+      MYSQL_DATABASE: exvo_booking_db
+      MYSQL_USER: bookinguser
+      MYSQL_PASSWORD: "${AZURE_MYSQL_PASSWORD:?Set AZURE_MYSQL_PASSWORD in .env.local or the shell}"
+    ports:
+      - "3307:3306"
+    volumes:
+      - booking_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_PASSWORD\" mysqladmin ping -h localhost -u\"$$MYSQL_USER\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
   apigateway:
     build:
       context: .
@@ -87,14 +128,18 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       ReverseProxy__Clusters__auth-cluster__Destinations__authServiceDestination__Address: http://authservice:8080
       ReverseProxy__Clusters__catalog-cluster__Destinations__catalogServiceDestination__Address: http://catalogservice:8080
+      ReverseProxy__Clusters__booking-cluster__Destinations__bookingServiceDestination__Address: http://bookingservice:8080
     depends_on:
       authservice:
         condition: service_started
       catalogservice:
+        condition: service_started
+      bookingservice:
         condition: service_started
     ports:
       - "5000:8080"
 
 volumes:
   mysql_data:
+  booking_mysql_data:
   kafka_data:
