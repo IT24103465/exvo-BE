@@ -8,3 +8,7 @@ public record SeatingSectionResponse(int Id, string Name, int RowCount, int Seat
 public record SeatResponse(string SeatCode, string RowLabel, int SeatNumber, int? TicketTierId, decimal Price, bool IsEnabled, string Status);
 public record SeatingAvailabilityResponse(int EventId, int AvailableSeatCount, List<TierAvailabilityResponse> Tiers);
 public record TierAvailabilityResponse(int? TicketTierId, decimal Price, int AvailableQuantity);
+public record SeatHoldRequest(List<string> SeatCodes);
+public record SeatHoldResponse(int HoldId, int EventId, List<string> SeatCodes, DateTime ExpiresAtUtc);
+public record ConfirmSeatHoldRequest(string? PaymentMethod = null);
+public record BookingConfirmationResponse(int BookingId, string BookingReference, int EventId, decimal TotalAmount, string Currency, List<string> SeatCodes);

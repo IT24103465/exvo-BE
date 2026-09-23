@@ -10,6 +10,8 @@ public class BookingDbContext(DbContextOptions<BookingDbContext> options) : DbCo
     public DbSet<Seat> Seats => Set<Seat>();
     public DbSet<Booking> Bookings => Set<Booking>();
     public DbSet<BookingItem> BookingItems => Set<BookingItem>();
+    public DbSet<SeatHold> SeatHolds => Set<SeatHold>();
+    public DbSet<SeatHoldItem> SeatHoldItems => Set<SeatHoldItem>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -48,6 +50,7 @@ public class BookingDbContext(DbContextOptions<BookingDbContext> options) : DbCo
             entity.HasIndex(seat => seat.SeatingSectionId);
             entity.HasIndex(seat => seat.Status);
             entity.HasIndex(seat => seat.HoldExpiresAtUtc);
+            entity.Property(seat => seat.Version).IsConcurrencyToken();
         });
 
         modelBuilder.Entity<Booking>(entity =>
@@ -68,6 +71,22 @@ public class BookingDbContext(DbContextOptions<BookingDbContext> options) : DbCo
             entity.Property(item => item.SeatCode).HasMaxLength(50).IsRequired();
             entity.Property(item => item.UnitPrice).HasPrecision(18, 2);
             entity.HasIndex(item => item.SeatId);
+            entity.HasOne(item => item.Seat).WithMany().HasForeignKey(item => item.SeatId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<SeatHold>(entity =>
+        {
+            entity.HasKey(hold => hold.Id);
+            entity.Property(hold => hold.Status).HasConversion<string>().HasMaxLength(20).IsRequired();
+            entity.HasIndex(hold => new { hold.EventId, hold.Status, hold.ExpiresAtUtc });
+            entity.HasMany(hold => hold.Items).WithOne(item => item.SeatHold)
+                .HasForeignKey(item => item.SeatHoldId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<SeatHoldItem>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => new { item.SeatHoldId, item.SeatId }).IsUnique();
             entity.HasOne(item => item.Seat).WithMany().HasForeignKey(item => item.SeatId).OnDelete(DeleteBehavior.Restrict);
         });
     }

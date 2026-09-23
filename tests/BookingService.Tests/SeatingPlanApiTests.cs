@@ -17,6 +17,7 @@ using Microsoft.IdentityModel.Tokens;
 public sealed class BookingFactory : WebApplicationFactory<Program>
 {
     public const string Key = "Booking_Tests_Signing_Key_Only_At_Least_32_Bytes!";
+    private readonly string databaseName = $"BookingServiceApiTests-{Guid.NewGuid()}";
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -32,7 +33,7 @@ public sealed class BookingFactory : WebApplicationFactory<Program>
         {
             services.RemoveAll<DbContextOptions<BookingDbContext>>();
             services.RemoveAll<BookingDbContext>();
-            services.AddDbContext<BookingDbContext>(options => options.UseInMemoryDatabase("BookingServiceApiTests"));
+            services.AddDbContext<BookingDbContext>(options => options.UseInMemoryDatabase(databaseName));
             services.RemoveAll<IEventOwnershipClient>();
             services.AddScoped<IEventOwnershipClient, TestOwnershipClient>();
             services.PostConfigure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, options =>
@@ -42,10 +43,10 @@ public sealed class BookingFactory : WebApplicationFactory<Program>
         });
     }
 
-    public HttpClient Client(string id = "11")
+    public HttpClient Client(string id = "11", string role = "Organizer")
     {
         var client = CreateClient();
-        var claims = new[] { new Claim(ClaimTypes.Role, "Organizer"), new Claim(JwtRegisteredClaimNames.Sub, id) };
+        var claims = new[] { new Claim(ClaimTypes.Role, role), new Claim(JwtRegisteredClaimNames.Sub, id) };
         var token = new JwtSecurityToken("ExvoAuthService", "ExvoPlatform", claims,
             expires: DateTime.UtcNow.AddMinutes(10), signingCredentials: new SigningCredentials(
                 new SymmetricSecurityKey(Encoding.UTF8.GetBytes(Key)), SecurityAlgorithms.HmacSha256));
@@ -104,9 +105,51 @@ public class SeatingPlanApiTests
         Assert.Equal(HttpStatusCode.NotFound, (await otherOrganizer.PostAsJsonAsync("/api/booking/events/1/seating-plan", Request())).StatusCode);
     }
 
+    [Fact]
+    public async Task AttendeeCanHoldSeatsAndAnotherAttendeeCannotTakeThem()
+    {
+        await using var factory = new BookingFactory();
+        using var organizer = factory.Client();
+        Assert.Equal(HttpStatusCode.OK, (await organizer.PostAsJsonAsync("/api/booking/events/1/seating-plan", Request())).StatusCode);
+        using var attendee = factory.Client("42", "Attendee");
+        var held = await attendee.PostAsJsonAsync("/api/booking/events/1/seat-holds", new { seatCodes = new[] { "A-01" } });
+        Assert.Equal(HttpStatusCode.OK, held.StatusCode);
+        var hold = await held.Content.ReadFromJsonAsync<HoldResponse>();
+        Assert.Equal(new[] { "A-01" }, hold!.SeatCodes);
+        Assert.Equal(5, (hold.ExpiresAtUtc - DateTime.UtcNow).TotalMinutes, precision: 0);
+
+        using var otherAttendee = factory.Client("43", "Attendee");
+        var conflict = await otherAttendee.PostAsJsonAsync("/api/booking/events/1/seat-holds", new { seatCodes = new[] { "A-01" } });
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await attendee.DeleteAsync($"/api/booking/events/1/seat-holds/{hold.HoldId}")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await otherAttendee.PostAsJsonAsync("/api/booking/events/1/seat-holds", new { seatCodes = new[] { "A-01" } })).StatusCode);
+    }
+
+    [Fact]
+    public async Task AttendeeCanConfirmHoldAndSeatBecomesBooked()
+    {
+        await using var factory = new BookingFactory();
+        using var organizer = factory.Client();
+        Assert.Equal(HttpStatusCode.OK, (await organizer.PostAsJsonAsync("/api/booking/events/1/seating-plan", Request())).StatusCode);
+        using var attendee = factory.Client("42", "Attendee");
+        var hold = await (await attendee.PostAsJsonAsync("/api/booking/events/1/seat-holds", new { seatCodes = new[] { "A-01" } }))
+            .Content.ReadFromJsonAsync<HoldResponse>();
+
+        var response = await attendee.PostAsync($"/api/booking/events/1/seat-holds/{hold!.HoldId}/confirm", null);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var confirmation = await response.Content.ReadFromJsonAsync<BookingConfirmationResponse>();
+        Assert.StartsWith("EXVO-", confirmation!.BookingReference);
+        Assert.Equal(new[] { "A-01" }, confirmation.SeatCodes);
+
+        var plan = await attendee.GetFromJsonAsync<PlanResponse>("/api/booking/events/1/seating-plan");
+        Assert.Equal("Booked", plan!.Sections.Single().Seats.Single(seat => seat.SeatCode == "A-01").Status);
+    }
+
     private sealed record PlanResponse(int Id, int EventId, string Name, bool IsVisibleToAttendees, string Status, int Version, List<SectionResponse> Sections);
     private sealed record SectionResponse(int Id, string Name, int RowCount, int SeatsPerRow, string StartingRowLabel, int StartingSeatNumber, int? TicketTierId, decimal Price, int DisplayOrder, List<SeatResponse> Seats);
     private sealed record SeatResponse(string SeatCode, string RowLabel, int SeatNumber, int? TicketTierId, decimal Price, bool IsEnabled, string Status);
     private sealed record AvailabilityResponse(int EventId, int AvailableSeatCount, List<TierAvailabilityResponse> Tiers);
     private sealed record TierAvailabilityResponse(int? TicketTierId, decimal Price, int AvailableQuantity);
+    private sealed record HoldResponse(int HoldId, int EventId, string[] SeatCodes, DateTime ExpiresAtUtc);
+    private sealed record BookingConfirmationResponse(int BookingId, string BookingReference, int EventId, decimal TotalAmount, string Currency, string[] SeatCodes);
 }
