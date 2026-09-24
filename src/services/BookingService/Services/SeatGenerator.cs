@@ -6,11 +6,22 @@ namespace Exvo.BookingService.Services;
 
 public static class SeatGenerator
 {
-    public static async Task RegenerateAsync(BookingDbContext db, SeatingPlan plan, CancellationToken cancellationToken = default)
+    public static async Task RegenerateAsync(BookingDbContext db, SeatingPlan plan, ISet<int>? activeSectionIds = null, CancellationToken cancellationToken = default)
     {
-        var sections = plan.Sections.OrderBy(section => section.DisplayOrder).ToList();
-        var sectionIds = sections.Where(section => section.Id > 0).Select(section => section.Id).ToArray();
+        var sections = plan.Sections
+            .Where(section => activeSectionIds is null || activeSectionIds.Contains(section.Id))
+            .OrderBy(section => section.DisplayOrder)
+            .ToList();
         var existingSeats = await db.Seats.Where(seat => seat.SeatingPlanId == plan.Id).ToListAsync(cancellationToken);
+        var existingSeatIds = existingSeats.Select(seat => seat.Id).ToArray();
+        var protectedSeatIds = (await db.BookingItems.AsNoTracking()
+                .Where(item => item.SeatId.HasValue && existingSeatIds.Contains(item.SeatId.Value))
+                .Select(item => item.SeatId!.Value)
+                .Concat(db.SeatHoldItems.AsNoTracking()
+                    .Where(item => existingSeatIds.Contains(item.SeatId))
+                    .Select(item => item.SeatId))
+                .ToListAsync(cancellationToken))
+            .ToHashSet();
         var desiredCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var section in sections)
@@ -58,7 +69,7 @@ public static class SeatGenerator
 
         foreach (var seat in existingSeats.Where(seat => !desiredCodes.Contains(seat.SeatCode)))
         {
-            if (seat.Status is SeatStatus.Held or SeatStatus.Booked)
+            if (seat.Status is SeatStatus.Held or SeatStatus.Booked || protectedSeatIds.Contains(seat.Id))
             {
                 seat.IsEnabled = false;
                 seat.UpdatedAtUtc = DateTime.UtcNow;
