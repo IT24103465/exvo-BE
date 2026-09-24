@@ -22,6 +22,14 @@ public enum BookingStatus
     Failed
 }
 
+public enum SeatHoldStatus
+{
+    Active,
+    Released,
+    Expired,
+    Converted
+}
+
 public class SeatingPlan
 {
     public int Id { get; set; }
@@ -102,5 +110,26 @@ public class BookingItem
     public decimal UnitPrice { get; set; }
     public int Quantity { get; set; } = 1;
     public Booking Booking { get; set; } = null!;
+    public Seat Seat { get; set; } = null!;
+}
+
+public class SeatHold
+{
+    public int Id { get; set; }
+    public int EventId { get; set; }
+    public int AttendeeUserId { get; set; }
+    public SeatHoldStatus Status { get; set; } = SeatHoldStatus.Active;
+    public DateTime CreatedAtUtc { get; set; }
+    public DateTime ExpiresAtUtc { get; set; }
+    public DateTime? ReleasedAtUtc { get; set; }
+    public List<SeatHoldItem> Items { get; set; } = [];
+}
+
+public class SeatHoldItem
+{
+    public int Id { get; set; }
+    public int SeatHoldId { get; set; }
+    public int SeatId { get; set; }
+    public SeatHold SeatHold { get; set; } = null!;
     public Seat Seat { get; set; } = null!;
 }
