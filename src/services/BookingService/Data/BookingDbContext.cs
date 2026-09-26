@@ -57,6 +57,7 @@ public class BookingDbContext(DbContextOptions<BookingDbContext> options) : DbCo
         {
             entity.HasKey(booking => booking.Id);
             entity.Property(booking => booking.BookingReference).HasMaxLength(100).IsRequired();
+            entity.Property(booking => booking.AttendeeEmail).HasMaxLength(320).IsRequired();
             entity.Property(booking => booking.Status).HasConversion<string>().HasMaxLength(20).IsRequired();
             entity.Property(booking => booking.TotalAmount).HasPrecision(18, 2);
             entity.Property(booking => booking.Currency).HasMaxLength(3).IsRequired();

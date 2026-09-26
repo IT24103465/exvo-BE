@@ -5,6 +5,7 @@ using System.Text;
 using Exvo.BookingService.Contracts;
 using Exvo.BookingService.Data;
 using Exvo.BookingService.Models;
+using Exvo.BookingService.Notifications;
 using Exvo.BookingService.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
@@ -24,6 +25,10 @@ builder.Services.AddHttpClient("CatalogService", client =>
     client.BaseAddress = new Uri(builder.Configuration["CatalogService:BaseUrl"] ?? "http://localhost:5255"));
 builder.Services.AddScoped<IEventOwnershipClient, EventOwnershipClient>();
 builder.Services.AddScoped<IEventInventoryCatalogClient, EventInventoryCatalogClient>();
+builder.Services.Configure<EmailOptions>(builder.Configuration.GetSection("Email"));
+builder.Services.AddSingleton<IBookingNotificationQueue, BookingNotificationQueue>();
+builder.Services.AddScoped<IBookingEmailSender, BookingEmailSender>();
+builder.Services.AddHostedService<BookingNotificationWorker>();
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(options =>
 {
     options.SaveToken = true;
@@ -183,6 +188,7 @@ app.MapPost("/api/booking/events/{eventId:int}/seat-holds/{holdId:int}/confirm",
     var now = DateTime.UtcNow;
     await ExpireHoldsAsync(db, now, ct);
     var attendeeUserId = GetUserId(user);
+    var attendeeEmail = GetUserEmail(user);
     var hold = await db.SeatHolds.Include(item => item.Items)
         .SingleOrDefaultAsync(item => item.Id == holdId && item.EventId == eventId && item.AttendeeUserId == attendeeUserId, ct);
     if (hold is null) return Results.NotFound(new { message = "Seat hold was not found." });
@@ -249,6 +255,7 @@ app.MapPost("/api/booking/events/{eventId:int}/seat-holds/{holdId:int}/confirm",
         BookingReference = $"EXVO-{Guid.NewGuid():N}".ToUpperInvariant(),
         EventId = eventId,
         AttendeeUserId = attendeeUserId,
+        AttendeeEmail = attendeeEmail,
         Status = BookingStatus.Confirmed,
         TotalAmount = seats.Sum(seat => seat.Price) + generalItems.Sum(item => item.UnitPrice),
         CreatedAtUtc = now,
@@ -308,6 +315,7 @@ app.MapPost("/api/booking/events/{eventId:int}/general-bookings", async (int eve
     if (totalQuantity is < 1 or > 10) return Results.BadRequest(new { message = "Select between 1 and 10 tickets." });
 
     var attendeeUserId = GetUserId(user);
+    var attendeeEmail = GetUserEmail(user);
 
     var strategy = db.Database.CreateExecutionStrategy();
     return await strategy.ExecuteAsync(async () =>
@@ -351,6 +359,7 @@ app.MapPost("/api/booking/events/{eventId:int}/general-bookings", async (int eve
             BookingReference = $"EXVO-{Guid.NewGuid():N}".ToUpperInvariant(),
             EventId = eventId,
             AttendeeUserId = attendeeUserId,
+            AttendeeEmail = attendeeEmail,
             Status = BookingStatus.Confirmed,
             TotalAmount = items.Sum(item => item.UnitPrice),
             CreatedAtUtc = now,
@@ -374,6 +383,37 @@ app.MapPost("/api/booking/events/{eventId:int}/general-bookings", async (int eve
             items.Select(item => item.SeatCode).ToList(),
             selections.Select(selection => new ConfirmedTicketSelectionResponse(selection.TicketTierId, selection.Name, selection.UnitPrice, selection.Quantity)).ToList()));
     });
+}).RequireAuthorization();
+app.MapPost("/api/booking/{bookingId:int}/ticket-images", async (int bookingId, TicketImagesRequest request, ClaimsPrincipal user, BookingDbContext db, IBookingNotificationQueue queue, CancellationToken ct) =>
+{
+    var attendeeUserId = GetUserId(user);
+    var booking = await db.Bookings.Include(item => item.Items)
+        .SingleOrDefaultAsync(item => item.Id == bookingId && item.AttendeeUserId == attendeeUserId && item.Status == BookingStatus.Confirmed, ct);
+    if (booking is null) return Results.NotFound(new { message = "Confirmed booking was not found." });
+    if (request.Tickets is null || request.Tickets.Count != booking.Items.Count)
+        return Results.BadRequest(new { message = "Provide one rendered image for each ticket." });
+    if (request.Tickets.Select(ticket => ticket.BookingItemId).Distinct().Count() != booking.Items.Count)
+        return Results.BadRequest(new { message = "Each booking ticket must have exactly one rendered image." });
+
+    var rendered = new List<TicketAttachment>();
+    foreach (var ticket in request.Tickets)
+    {
+        var item = booking.Items.SingleOrDefault(candidate => candidate.Id == ticket.BookingItemId);
+        var expectedCode = item is null ? string.Empty : $"{booking.BookingReference}-{item.Id}";
+        if (item is null || !string.Equals(ticket.TicketCode, expectedCode, StringComparison.Ordinal) ||
+            !ticket.Image.StartsWith("data:image/jpeg;base64,", StringComparison.Ordinal))
+            return Results.BadRequest(new { message = "Ticket image details do not match this booking." });
+
+        byte[] bytes;
+        try { bytes = Convert.FromBase64String(ticket.Image["data:image/jpeg;base64,".Length..]); }
+        catch (FormatException) { return Results.BadRequest(new { message = "Ticket image data is invalid." }); }
+        if (bytes.Length < 4 || bytes.Length > 8_000_000 || bytes[0] != 0xFF || bytes[1] != 0xD8 || bytes[^2] != 0xFF || bytes[^1] != 0xD9)
+            return Results.BadRequest(new { message = "Ticket image must be a valid JPEG under 8 MB." });
+        rendered.Add(new TicketAttachment($"{expectedCode}.jpg", "image/jpeg", bytes));
+    }
+
+    await queue.QueueAsync(new BookingNotification(booking.Id, rendered), ct);
+    return Results.Ok(new { queued = true });
 }).RequireAuthorization();
 app.MapGet("/api/booking/my-tickets", async (ClaimsPrincipal user, BookingDbContext db, CancellationToken ct) =>
 {
@@ -501,6 +541,12 @@ static SeatingPlanResponse ToResponse(SeatingPlan plan) => new(plan.Id, plan.Eve
         plan.Seats.Where(seat => seat.SeatingSectionId == section.Id).OrderBy(seat => seat.RowLabel).ThenBy(seat => seat.SeatNumber).Select(seat => new SeatResponse(seat.SeatCode, seat.RowLabel, seat.SeatNumber, seat.TicketTierId, seat.Price, seat.IsEnabled, seat.Status.ToString())).ToList())).ToList());
 
 static int GetUserId(ClaimsPrincipal user) => int.Parse(user.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? user.FindFirst("sub")?.Value ?? throw new UnauthorizedAccessException());
+
+static string GetUserEmail(ClaimsPrincipal user) =>
+    user.FindFirst(ClaimTypes.Email)?.Value
+    ?? user.FindFirst(JwtRegisteredClaimNames.Email)?.Value
+    ?? user.FindFirst("email")?.Value
+    ?? throw new UnauthorizedAccessException("The attendee email claim is required to send booking confirmations.");
 
 static string InventoryStatus(int available, int held, int total)
 {

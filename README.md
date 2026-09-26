@@ -54,7 +54,7 @@ Other scaffolded services (not routed by the gateway):
 ## Prerequisites
 
 - .NET 8 SDK
-- Docker Desktop with Docker Compose (only for the local MySQL fallback)
+- Docker Desktop with Docker Compose v2 (`docker compose`)
 - Visual Studio 2022 or VS Code with C# Dev Kit
 
 ```powershell
@@ -101,12 +101,61 @@ Azure resource commands. Catalog's existing startup category seeding still runs.
 The manual local/Docker workflow below and its connection-string fallbacks remain
 available when the service-specific environment variables are unset.
 
+## Run the backend with Docker Compose
+
+Install and start Docker Desktop, then run these commands from the backend root
+(`exvo-be`). The full Compose stack uses Azure MySQL for Auth, Catalog, and Booking;
+the Azure server and schemas must already exist.
+
+```powershell
+Copy-Item .env.example .env.local
+```
+
+Edit `.env.local` and set `AZURE_MYSQL_PASSWORD` to the Azure MySQL password. The
+other Azure settings default to the values shown in `.env.example`. Keep this file
+local; it is ignored by Git.
+
+Build and start the services:
+
+```powershell
+docker compose --env-file .env.local up --build -d
+docker compose --env-file .env.local ps
+```
+
+The gateway is at `http://localhost:5000`. Follow service logs with
+`docker compose --env-file .env.local logs -f`; press Ctrl+C to stop following logs
+without stopping the containers. To stop and remove the containers and network while
+keeping database volumes, run:
+
+```powershell
+docker compose --env-file .env.local down
+```
+
+To also delete the Compose-managed database and Kafka data, use the following only
+when you intend to permanently discard that data:
+
+```powershell
+docker compose --env-file .env.local down --volumes
+```
+
+To run only the optional local MySQL container instead of the application stack:
+
+```powershell
+docker compose --profile local up -d mysql-dev
+docker compose --profile local ps
+docker compose --profile local down
+```
+
+This local MySQL profile does not automatically redirect the full application stack
+from Azure MySQL to localhost. Use the manual local database workflow below when
+running services directly on the host.
+
 ## Manual startup with local Docker MySQL
 
 Run these commands from `exvo-be` (the directory containing `ExvoPlatform.sln`).
 
 ```powershell
-docker compose up -d mysql-dev
+docker compose --profile local up -d mysql-dev
 dotnet restore .\ExvoPlatform.sln
 dotnet build .\ExvoPlatform.sln
 dotnet ef database update --project .\src\services\AuthService\ExvoAuthService.csproj
@@ -120,21 +169,22 @@ container already exists, use this non-destructive command once instead of delet
 the volume:
 
 ```powershell
-docker exec -it exvo_mysql_dev mysql -uroot -p -e "CREATE DATABASE IF NOT EXISTS exvo_catalog_db;"
+docker exec -it exvo_mysql_dev mysql -uroot -e "CREATE DATABASE IF NOT EXISTS exvo_catalog_db;"
 ```
 
-Enter the local MySQL root password when prompted. Check both databases directly:
+The development container allows an empty MySQL root password. Check both databases
+directly:
 
 ```powershell
-docker exec -it exvo_mysql_dev mysql -uroot -p -e "SHOW DATABASES;"
+docker exec -it exvo_mysql_dev mysql -uroot -e "SHOW DATABASES;"
 ```
 
 Only use the following reset when it is acceptable to delete all local MySQL data;
 it causes the init script to run on the next startup:
 
 ```powershell
-docker compose down -v
-docker compose up -d mysql-dev
+docker compose --profile local down -v
+docker compose --profile local up -d mysql-dev
 ```
 
 For Azure MySQL, use the local development startup script above.

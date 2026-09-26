@@ -17,3 +17,5 @@ public record BookingConfirmationResponse(int BookingId, string BookingReference
 public record ConfirmedTicketSelectionResponse(int? TicketTierId, string Name, decimal UnitPrice, int Quantity);
 public record AttendeeBookingResponse(int BookingId, string BookingReference, int EventId, string Status, decimal TotalAmount, string Currency, DateTime CreatedAtUtc, DateTime? ConfirmedAtUtc, List<AttendeeTicketResponse> Tickets);
 public record AttendeeTicketResponse(int BookingItemId, string TicketCode, string SeatCode, string RowLabel, int SeatNumber, string SectionName, int? TicketTierId, decimal Price, bool HasSeat);
+public record TicketImagesRequest(List<RenderedTicketImageRequest> Tickets);
+public record RenderedTicketImageRequest(int BookingItemId, string TicketCode, string Image);

@@ -6,10 +6,20 @@ namespace Exvo.BookingService.Services;
 public interface IEventInventoryCatalogClient
 {
     Task<EventTicketCatalog?> GetTicketCatalogAsync(int eventId, CancellationToken cancellationToken);
+    Task<EventTicketSnapshot?> GetEventSnapshotAsync(int eventId, CancellationToken cancellationToken);
 }
 
 public sealed record EventTicketCatalog(int EventId, int AvailableTickets, IReadOnlyList<CatalogTicketTier> Tiers);
 public sealed record CatalogTicketTier(int? TicketTierId, string Name, decimal Price, int Quantity);
+public sealed record EventTicketSnapshot(
+    int EventId,
+    string Title,
+    DateTime EventDate,
+    int? UtcOffsetMinutes,
+    string? Venue,
+    string? ArtistOrOrganizer,
+    string? Category,
+    string? CoverImage);
 
 public sealed class EventInventoryCatalogClient(IHttpClientFactory httpClientFactory) : IEventInventoryCatalogClient
 {
@@ -32,6 +42,27 @@ public sealed class EventInventoryCatalogClient(IHttpClientFactory httpClientFac
         }
 
         return new EventTicketCatalog(eventId, availableTickets, tiers);
+    }
+
+    public async Task<EventTicketSnapshot?> GetEventSnapshotAsync(int eventId, CancellationToken cancellationToken)
+    {
+        var client = httpClientFactory.CreateClient("CatalogService");
+        using var response = await client.GetAsync($"/api/catalog/events/{eventId}/ticket-snapshot", cancellationToken);
+        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+        var root = document.RootElement;
+        return new EventTicketSnapshot(
+            eventId,
+            GetString(root, "title") ?? $"Event #{eventId}",
+            GetDateTime(root, "eventDate") ?? DateTime.MinValue,
+            GetInt(root, "utcOffsetMinutes"),
+            GetString(root, "venue") ?? GetString(root, "location"),
+            GetString(root, "artistOrOrganizer") ?? GetString(root, "organizerName"),
+            GetString(root, "category") ?? GetString(root, "categoryName"),
+            GetString(root, "coverImage") ?? GetString(root, "imageUrl"));
     }
 
     private static List<CatalogTicketTier> ParseTiers(JsonElement root)
@@ -108,5 +139,15 @@ public sealed class EventInventoryCatalogClient(IHttpClientFactory httpClientFac
     {
         if (!TryGetProperty(element, propertyName, out var property)) return null;
         return property.ValueKind == JsonValueKind.String ? property.GetString() : null;
+    }
+
+    private static DateTime? GetDateTime(JsonElement element, string propertyName)
+    {
+        if (!TryGetProperty(element, propertyName, out var property)) return null;
+        return property.ValueKind switch
+        {
+            JsonValueKind.String when property.TryGetDateTime(out var value) => value,
+            _ => null
+        };
     }
 }
