@@ -86,6 +86,13 @@ services:
       ASPNETCORE_URLS: http://+:8080
       EXVO_BOOKING_MYSQL_CONNECTION_STRING: "Server=bookingdb;Port=3306;Database=exvo_booking_db;User=bookinguser;Password=${AZURE_MYSQL_PASSWORD:?Set AZURE_MYSQL_PASSWORD in .env.local or the shell};SslMode=None"
       CatalogService__BaseUrl: http://catalogservice:8080
+      Email__Host: ${EMAIL_HOST:-}
+      Email__Port: ${EMAIL_PORT:-587}
+      Email__UserName: ${EMAIL_USERNAME:-}
+      Email__Password: ${EMAIL_PASSWORD:-}
+      Email__From: ${EMAIL_FROM:-tickets@exvo.local}
+      Email__EnableSsl: ${EMAIL_ENABLE_SSL:-true}
+      Email__PickupDirectory: ${EMAIL_PICKUP_DIRECTORY:-notifications-outbox}
     depends_on:
       bookingdb:
         condition: service_healthy

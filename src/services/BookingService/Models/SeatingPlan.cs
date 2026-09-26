@@ -91,6 +91,7 @@ public class Booking
     public string BookingReference { get; set; } = string.Empty;
     public int EventId { get; set; }
     public int AttendeeUserId { get; set; }
+    public string AttendeeEmail { get; set; } = string.Empty;
     public BookingStatus Status { get; set; } = BookingStatus.Pending;
     public decimal TotalAmount { get; set; }
     public string Currency { get; set; } = "LKR";

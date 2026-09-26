@@ -5,11 +5,14 @@ using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Text;
 using Exvo.BookingService.Data;
+using Exvo.BookingService.Models;
+using Exvo.BookingService.Notifications;
 using Exvo.BookingService.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.IdentityModel.Tokens;
@@ -18,6 +21,7 @@ public sealed class BookingFactory : WebApplicationFactory<Program>
 {
     public const string Key = "Booking_Tests_Signing_Key_Only_At_Least_32_Bytes!";
     private readonly string databaseName = $"BookingServiceApiTests-{Guid.NewGuid()}";
+    public RecordingBookingEmailSender EmailSender { get; } = new();
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -38,6 +42,9 @@ public sealed class BookingFactory : WebApplicationFactory<Program>
             services.AddScoped<IEventOwnershipClient, TestOwnershipClient>();
             services.RemoveAll<IEventInventoryCatalogClient>();
             services.AddScoped<IEventInventoryCatalogClient, TestInventoryCatalogClient>();
+            services.RemoveAll<IBookingEmailSender>();
+            services.AddSingleton(EmailSender);
+            services.AddSingleton<IBookingEmailSender>(serviceProvider => serviceProvider.GetRequiredService<RecordingBookingEmailSender>());
             services.PostConfigure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, options =>
             {
                 options.TokenValidationParameters.IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(Key));
@@ -45,16 +52,63 @@ public sealed class BookingFactory : WebApplicationFactory<Program>
         });
     }
 
-    public HttpClient Client(string id = "11", string role = "Organizer")
+    public HttpClient Client(string id = "11", string role = "Organizer", string? email = null)
     {
         var client = CreateClient();
-        var claims = new[] { new Claim(ClaimTypes.Role, role), new Claim(JwtRegisteredClaimNames.Sub, id) };
+        email ??= $"user{id}@example.test";
+        var claims = new[]
+        {
+            new Claim(ClaimTypes.Role, role),
+            new Claim(JwtRegisteredClaimNames.Sub, id),
+            new Claim(JwtRegisteredClaimNames.Email, email)
+        };
         var token = new JwtSecurityToken("ExvoAuthService", "ExvoPlatform", claims,
             expires: DateTime.UtcNow.AddMinutes(10), signingCredentials: new SigningCredentials(
                 new SymmetricSecurityKey(Encoding.UTF8.GetBytes(Key)), SecurityAlgorithms.HmacSha256));
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", new JwtSecurityTokenHandler().WriteToken(token));
         return client;
     }
+}
+
+public sealed record SentBookingEmail(string Recipient, string Subject, string Body, IReadOnlyList<TicketAttachment> Tickets);
+
+public sealed class RecordingBookingEmailSender : IBookingEmailSender
+{
+    private TaskCompletionSource<SentBookingEmail> sent = NewCompletionSource();
+    public TimeSpan Delay { get; set; }
+    public IReadOnlyList<SentBookingEmail> Sent => sentEmails;
+    private readonly List<SentBookingEmail> sentEmails = [];
+
+    public async Task SendConfirmationAsync(Booking booking, EventTicketSnapshot? eventSnapshot, IReadOnlyList<TicketAttachment> tickets, CancellationToken cancellationToken)
+    {
+        if (Delay > TimeSpan.Zero)
+        {
+            await Task.Delay(Delay, cancellationToken);
+        }
+
+        var eventTitle = eventSnapshot?.Title ?? $"Event #{booking.EventId}";
+        var body = $"""
+                   Event: {eventTitle}
+                   Date: {eventSnapshot?.EventDate:yyyy-MM-dd}
+                   Time: {eventSnapshot?.EventDate:HH:mm}
+                   Ticket reference:
+                   {string.Join(Environment.NewLine, tickets.Select(ticket => $"- {Path.GetFileNameWithoutExtension(ticket.FileName)}"))}
+                   """;
+        var email = new SentBookingEmail(booking.AttendeeEmail, $"EXVO booking confirmed - {booking.BookingReference}", body, tickets);
+        sentEmails.Add(email);
+        sent.TrySetResult(email);
+    }
+
+    public Task<SentBookingEmail> WaitForEmailAsync(TimeSpan timeout)
+    {
+        var current = sent.Task;
+        return current.WaitAsync(timeout);
+    }
+
+    public bool HasPendingEmail => !sent.Task.IsCompleted;
+
+    private static TaskCompletionSource<SentBookingEmail> NewCompletionSource() =>
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
 }
 
 public sealed class TestOwnershipClient : IEventOwnershipClient
@@ -77,6 +131,17 @@ public sealed class TestInventoryCatalogClient : IEventInventoryCatalogClient
             _ => null
         };
         return Task.FromResult(catalog);
+    }
+
+    public Task<EventTicketSnapshot?> GetEventSnapshotAsync(int eventId, CancellationToken cancellationToken)
+    {
+        EventTicketSnapshot? snapshot = eventId switch
+        {
+            2 => new EventTicketSnapshot(2, "Wayo Live", new DateTime(2026, 10, 15, 19, 30, 0), 330, "Nelum Pokuna", "Wayo", "Music & Concerts", null),
+            99 => new EventTicketSnapshot(99, "EXVO Test Night", new DateTime(2026, 11, 5, 20, 0, 0), 330, "Colombo", "EXVO", "Music & Concerts", null),
+            _ => new EventTicketSnapshot(eventId, $"Event #{eventId}", new DateTime(2026, 12, 1, 19, 0, 0), 330, "Venue", "Organizer", "Music & Concerts", null)
+        };
+        return Task.FromResult<EventTicketSnapshot?>(snapshot);
     }
 }
 
@@ -164,6 +229,65 @@ public class SeatingPlanApiTests
 
         var plan = await attendee.GetFromJsonAsync<PlanResponse>("/api/booking/events/1/seating-plan");
         Assert.Equal("Booked", plan!.Sections.Single().Seats.Single(seat => seat.SeatCode == "A-01").Status);
+    }
+
+    [Fact]
+    public async Task ConfirmedBookingSendsConfirmationEmailWithTicketAttachmentToAttendee()
+    {
+        await using var factory = new BookingFactory();
+        using var attendee = factory.Client("42", "Attendee", "attendee42@example.test");
+
+        var response = await attendee.PostAsJsonAsync("/api/booking/events/99/general-bookings", new
+        {
+            tickets = new[]
+            {
+                new { ticketTierId = (int?)7, name = "General Admission", unitPrice = 2500m, quantity = 1 }
+            }
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var confirmation = await response.Content.ReadFromJsonAsync<BookingConfirmationResponse>();
+        var email = await factory.EmailSender.WaitForEmailAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal("attendee42@example.test", email.Recipient);
+        Assert.Contains(confirmation!.BookingReference, email.Subject);
+        Assert.Contains("EXVO Test Night", email.Body);
+        Assert.Contains("2026-11-05", email.Body);
+        Assert.Contains("20:00", email.Body);
+        Assert.Single(email.Tickets);
+        Assert.StartsWith(confirmation.BookingReference, email.Tickets[0].FileName);
+        Assert.EndsWith(".jpg", email.Tickets[0].FileName);
+        Assert.Equal("image/jpeg", email.Tickets[0].ContentType);
+        Assert.Equal(0xFF, email.Tickets[0].Content[0]);
+        Assert.Equal(0xD8, email.Tickets[0].Content[1]);
+        Assert.Equal(0xFF, email.Tickets[0].Content[^2]);
+        Assert.Equal(0xD9, email.Tickets[0].Content[^1]);
+        Assert.Equal((900, 1400), ReadJpegDimensions(email.Tickets[0].Content));
+    }
+
+    [Fact]
+    public async Task BookingConfirmationDoesNotWaitForSlowEmailDelivery()
+    {
+        await using var factory = new BookingFactory();
+        factory.EmailSender.Delay = TimeSpan.FromSeconds(2);
+        using var attendee = factory.Client("42", "Attendee", "slow-delivery@example.test");
+
+        var started = DateTime.UtcNow;
+        var response = await attendee.PostAsJsonAsync("/api/booking/events/99/general-bookings", new
+        {
+            tickets = new[]
+            {
+                new { ticketTierId = (int?)7, name = "General Admission", unitPrice = 2500m, quantity = 1 }
+            }
+        });
+        var elapsed = DateTime.UtcNow - started;
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(elapsed < TimeSpan.FromSeconds(1), $"Booking response took {elapsed.TotalMilliseconds}ms.");
+        Assert.True(factory.EmailSender.HasPendingEmail);
+
+        var email = await factory.EmailSender.WaitForEmailAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("slow-delivery@example.test", email.Recipient);
     }
 
     [Fact]
@@ -362,4 +486,23 @@ public class SeatingPlanApiTests
     private sealed record ConfirmedTicketSelectionResponse(int? TicketTierId, string Name, decimal UnitPrice, int Quantity);
     private sealed record AttendeeBookingResponse(int BookingId, string BookingReference, int EventId, string Status, decimal TotalAmount, string Currency, DateTime CreatedAtUtc, DateTime? ConfirmedAtUtc, List<AttendeeTicketResponse> Tickets);
     private sealed record AttendeeTicketResponse(int BookingItemId, string TicketCode, string SeatCode, string RowLabel, int SeatNumber, string SectionName, int? TicketTierId, decimal Price, bool HasSeat);
+
+    private static (int Width, int Height) ReadJpegDimensions(byte[] jpeg)
+    {
+        var index = 2;
+        while (index + 8 < jpeg.Length)
+        {
+            if (jpeg[index] != 0xFF) index++;
+            var marker = jpeg[index + 1];
+            var length = (jpeg[index + 2] << 8) + jpeg[index + 3];
+            if (marker is >= 0xC0 and <= 0xC3)
+            {
+                var height = (jpeg[index + 5] << 8) + jpeg[index + 6];
+                var width = (jpeg[index + 7] << 8) + jpeg[index + 8];
+                return (width, height);
+            }
+            index += 2 + length;
+        }
+        throw new InvalidOperationException("JPEG dimensions were not found.");
+    }
 }

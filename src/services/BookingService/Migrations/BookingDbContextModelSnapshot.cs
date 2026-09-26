@@ -33,6 +33,11 @@ namespace Exvo.BookingService.Migrations
                     b.Property<int>("AttendeeUserId")
                         .HasColumnType("int");
 
+                    b.Property<string>("AttendeeEmail")
+                        .IsRequired()
+                        .HasMaxLength(320)
+                        .HasColumnType("varchar(320)");
+
                     b.Property<string>("BookingReference")
                         .IsRequired()
                         .HasMaxLength(100)
