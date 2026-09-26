@@ -324,6 +324,46 @@ app.MapGet("/api/catalog/events/{id:int}", async (int id, ClaimsPrincipal user, 
 .WithName("GetEventById")
 .WithOpenApi();
 
+app.MapGet("/api/catalog/events/{id:int}/ticket-snapshot", async (int id, CatalogDbContext db, TimeProvider clock) =>
+{
+    await EventSchedule.HideExpiredAsync(db, clock.GetUtcNow().UtcDateTime);
+    var evt = await db.Events.Include(e => e.Category).FirstOrDefaultAsync(e => e.Id == id);
+    if (evt == null)
+    {
+        return Results.NotFound(new { Message = "Event not found." });
+    }
+
+    var result = new
+    {
+        evt.Id,
+        evt.Title,
+        evt.Description,
+        evt.Location,
+        evt.Venue,
+        evt.Price,
+        evt.EventDate,
+        evt.UtcOffsetMinutes,
+        StartsAtUtc = EventSchedule.StartsAtUtc(evt),
+        evt.CategoryId,
+        CategoryName = evt.Category != null ? evt.Category.Name : "Music & Concerts",
+        Category = evt.Category != null ? evt.Category.Name : "Music & Concerts",
+        evt.OrganizerId,
+        evt.OrganizerName,
+        evt.ArtistOrOrganizer,
+        evt.ImageUrl,
+        CoverImage = evt.ImageUrl,
+        evt.AvailableTickets,
+        evt.TicketTiersJson,
+        evt.CreatedAt,
+        evt.IsHidder,
+        IsHidden = evt.IsHidder
+    };
+
+    return Results.Ok(result);
+})
+.WithName("GetEventTicketSnapshot")
+.WithOpenApi();
+
 // --- EVENT CREATION API ---
 
 app.MapPost("/api/catalog/events", async (ClaimsPrincipal claimsPrincipal, Event evt, CatalogDbContext db) =>

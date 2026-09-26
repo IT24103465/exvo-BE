@@ -71,7 +71,7 @@ public class BookingDbContext(DbContextOptions<BookingDbContext> options) : DbCo
             entity.Property(item => item.SeatCode).HasMaxLength(50).IsRequired();
             entity.Property(item => item.UnitPrice).HasPrecision(18, 2);
             entity.HasIndex(item => item.SeatId);
-            entity.HasOne(item => item.Seat).WithMany().HasForeignKey(item => item.SeatId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.Seat).WithMany().HasForeignKey(item => item.SeatId).OnDelete(DeleteBehavior.Restrict).IsRequired(false);
         });
 
         modelBuilder.Entity<SeatHold>(entity =>

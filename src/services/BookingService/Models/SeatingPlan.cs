@@ -104,13 +104,13 @@ public class BookingItem
 {
     public int Id { get; set; }
     public int BookingId { get; set; }
-    public int SeatId { get; set; }
+    public int? SeatId { get; set; }
     public string SeatCode { get; set; } = string.Empty;
     public int? TicketTierId { get; set; }
     public decimal UnitPrice { get; set; }
     public int Quantity { get; set; } = 1;
     public Booking Booking { get; set; } = null!;
-    public Seat Seat { get; set; } = null!;
+    public Seat? Seat { get; set; }
 }
 
 public class SeatHold
