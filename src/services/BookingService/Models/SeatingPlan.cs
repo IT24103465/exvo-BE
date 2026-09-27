@@ -134,3 +134,8 @@ public class SeatHoldItem
     public SeatHold SeatHold { get; set; } = null!;
     public Seat Seat { get; set; } = null!;
 }
+
+public class BookingInventoryLock
+{
+    public int EventId { get; set; }
+}

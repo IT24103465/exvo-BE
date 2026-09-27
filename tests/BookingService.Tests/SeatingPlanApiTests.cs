@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.IdentityModel.Tokens;
@@ -26,6 +27,7 @@ public sealed class BookingFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
+        builder.ConfigureLogging(logging => logging.ClearProviders());
         var contentRoot = Environment.GetEnvironmentVariable("EXVO_BOOKING_TEST_CONTENT_ROOT")
             ?? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../src/services/BookingService"));
         if (!Directory.Exists(contentRoot))
@@ -128,6 +130,7 @@ public sealed class TestInventoryCatalogClient : IEventInventoryCatalogClient
                 new CatalogTicketTier(8, "General Admission", 1500m, 4)
             ]),
             99 => new EventTicketCatalog(99, 2, [new CatalogTicketTier(7, "General Admission", 2500m, 2)]),
+            100 => new EventTicketCatalog(100, 0, [new CatalogTicketTier(9, "No limit", 2500m, 0, true)]),
             _ => null
         };
         return Task.FromResult(catalog);
@@ -212,6 +215,89 @@ public class SeatingPlanApiTests
     }
 
     [Fact]
+    public async Task SavingAPlanKeepsOrganizerEnteredRowsAndEnforcesRemainingSeatLimits()
+    {
+        await using var factory = new BookingFactory();
+        using var organizer = factory.Client();
+        var saved = await organizer.PostAsJsonAsync("/api/booking/events/1/seating-plan", new
+        {
+            name = "Custom rows",
+            isVisibleToAttendees = true,
+            sections = new[]
+            {
+                new { name = "Orchestra", rowCount = 2, rowLabels = new[] { "A", "C" }, seatsPerRow = 2, startingRowLabel = "A", startingSeatNumber = 1, ticketTierId = (int?)null, price = 2500m, displayOrder = 0 }
+            }
+        });
+
+        Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
+        var plan = await saved.Content.ReadFromJsonAsync<PlanResponse>();
+        Assert.Contains(plan!.Sections.Single().Seats, seat => seat.SeatCode == "C-01");
+        Assert.DoesNotContain(plan.Sections.Single().Seats, seat => seat.SeatCode == "B-01");
+
+        var tooManySeats = await organizer.PostAsJsonAsync("/api/booking/events/1/seating-plan", new
+        {
+            name = "Oversized",
+            isVisibleToAttendees = true,
+            sections = new[]
+            {
+                new { name = "Orchestra", rowCount = 3, rowLabels = new[] { "A", "B", "C" }, seatsPerRow = 17, startingRowLabel = "A", startingSeatNumber = 1, ticketTierId = (int?)null, price = 2500m, displayOrder = 0 }
+            }
+        });
+        Assert.Equal(HttpStatusCode.OK, tooManySeats.StatusCode);
+
+        var tooManyInRow = await organizer.PostAsJsonAsync("/api/booking/events/1/seating-plan", new
+        {
+            name = "Oversized row",
+            isVisibleToAttendees = true,
+            sections = new[]
+            {
+                new { name = "Orchestra", rowCount = 1, rowLabels = new[] { "A" }, seatsPerRow = 21, startingRowLabel = "A", startingSeatNumber = 1, ticketTierId = (int?)null, price = 2500m, displayOrder = 0 }
+            }
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, tooManyInRow.StatusCode);
+
+        var overTierQuantity = await organizer.PostAsJsonAsync("/api/booking/events/2/seating-plan", new
+        {
+            name = "Too many seats for tier",
+            isVisibleToAttendees = true,
+            sections = new[]
+            {
+                new { name = "Reserved Seat", rowCount = 2, rowLabels = new[] { "A", "B" }, seatsPerRow = 4, startingRowLabel = "A", startingSeatNumber = 1, ticketTierId = (int?)7, price = 2500m, displayOrder = 0 }
+            }
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, overTierQuantity.StatusCode);
+    }
+
+    [Fact]
+    public async Task UnlimitedTicketTiersRemainAvailableAfterBookings()
+    {
+        await using var factory = new BookingFactory();
+        using var firstAttendee = factory.Client("42", "Attendee");
+        using var secondAttendee = factory.Client("43", "Attendee");
+        var request = new { tickets = new[] { new { ticketTierId = (int?)9, name = "No limit", unitPrice = 2500m, quantity = 10 } } };
+
+        Assert.Equal(HttpStatusCode.OK, (await firstAttendee.PostAsJsonAsync("/api/booking/events/100/general-bookings", request)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await secondAttendee.PostAsJsonAsync("/api/booking/events/100/general-bookings", request)).StatusCode);
+    }
+
+    [Fact]
+    public async Task SimultaneousSeatHoldsAllowOnlyOneAttendeeToAcquireTheSeat()
+    {
+        await using var factory = new BookingFactory();
+        using var organizer = factory.Client();
+        Assert.Equal(HttpStatusCode.OK, (await organizer.PostAsJsonAsync("/api/booking/events/1/seating-plan", Request())).StatusCode);
+        using var firstAttendee = factory.Client("42", "Attendee");
+        using var secondAttendee = factory.Client("43", "Attendee");
+
+        var responses = await Task.WhenAll(
+            firstAttendee.PostAsJsonAsync("/api/booking/events/1/seat-holds", new { seatCodes = new[] { "A-01" } }),
+            secondAttendee.PostAsJsonAsync("/api/booking/events/1/seat-holds", new { seatCodes = new[] { "A-01" } }));
+
+        Assert.Equal(1, responses.Count(response => response.StatusCode == HttpStatusCode.OK));
+        Assert.Equal(1, responses.Count(response => response.StatusCode == HttpStatusCode.Conflict));
+    }
+
+    [Fact]
     public async Task AttendeeCanConfirmHoldAndSeatBecomesBooked()
     {
         await using var factory = new BookingFactory();
@@ -232,6 +318,30 @@ public class SeatingPlanApiTests
     }
 
     [Fact]
+    public async Task FailedHoldConfirmationReleasesTheSeatImmediately()
+    {
+        await using var factory = new BookingFactory();
+        using var organizer = factory.Client();
+        Assert.Equal(HttpStatusCode.OK, (await organizer.PostAsJsonAsync("/api/booking/events/1/seating-plan", Request())).StatusCode);
+        using var firstAttendee = factory.Client("42", "Attendee");
+        using var secondAttendee = factory.Client("43", "Attendee");
+        var hold = await (await firstAttendee.PostAsJsonAsync("/api/booking/events/1/seat-holds", new { seatCodes = new[] { "A-01" } }))
+            .Content.ReadFromJsonAsync<HoldResponse>();
+
+        var failedConfirmation = await firstAttendee.PostAsJsonAsync($"/api/booking/events/1/seat-holds/{hold!.HoldId}/confirm", new
+        {
+            tickets = new[]
+            {
+                new { ticketTierId = (int?)7, name = "General Admission", unitPrice = 2500m, quantity = 1 }
+            }
+        });
+        Assert.Equal(HttpStatusCode.NotFound, failedConfirmation.StatusCode);
+
+        var newHold = await secondAttendee.PostAsJsonAsync("/api/booking/events/1/seat-holds", new { seatCodes = new[] { "A-01" } });
+        Assert.Equal(HttpStatusCode.OK, newHold.StatusCode);
+    }
+
+    [Fact]
     public async Task ConfirmedBookingSendsConfirmationEmailWithTicketAttachmentToAttendee()
     {
         await using var factory = new BookingFactory();
@@ -247,6 +357,7 @@ public class SeatingPlanApiTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var confirmation = await response.Content.ReadFromJsonAsync<BookingConfirmationResponse>();
+        await QueueTicketEmailAsync(attendee, confirmation!);
         var email = await factory.EmailSender.WaitForEmailAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal("attendee42@example.test", email.Recipient);
@@ -272,7 +383,6 @@ public class SeatingPlanApiTests
         factory.EmailSender.Delay = TimeSpan.FromSeconds(2);
         using var attendee = factory.Client("42", "Attendee", "slow-delivery@example.test");
 
-        var started = DateTime.UtcNow;
         var response = await attendee.PostAsJsonAsync("/api/booking/events/99/general-bookings", new
         {
             tickets = new[]
@@ -280,10 +390,20 @@ public class SeatingPlanApiTests
                 new { ticketTierId = (int?)7, name = "General Admission", unitPrice = 2500m, quantity = 1 }
             }
         });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var confirmation = await response.Content.ReadFromJsonAsync<BookingConfirmationResponse>();
+        var tickets = await attendee.GetFromJsonAsync<List<AttendeeBookingResponse>>("/api/booking/my-tickets");
+        var bookingTickets = tickets!.Single(booking => booking.BookingId == confirmation!.BookingId).Tickets;
+        var image = $"data:image/jpeg;base64,{Convert.ToBase64String(TestJpeg())}";
+        var started = DateTime.UtcNow;
+        var emailQueueResponse = await attendee.PostAsJsonAsync($"/api/booking/{confirmation!.BookingId}/ticket-images", new
+        {
+            tickets = bookingTickets.Select(ticket => new { bookingItemId = ticket.BookingItemId, ticketCode = ticket.TicketCode, image })
+        });
         var elapsed = DateTime.UtcNow - started;
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.True(elapsed < TimeSpan.FromSeconds(1), $"Booking response took {elapsed.TotalMilliseconds}ms.");
+        Assert.Equal(HttpStatusCode.OK, emailQueueResponse.StatusCode);
+        Assert.True(elapsed < TimeSpan.FromSeconds(1), $"Ticket email queue response took {elapsed.TotalMilliseconds}ms.");
         Assert.True(factory.EmailSender.HasPendingEmail);
 
         var email = await factory.EmailSender.WaitForEmailAsync(TimeSpan.FromSeconds(5));
@@ -476,6 +596,28 @@ public class SeatingPlanApiTests
         Assert.Equal("SoldOut", availability.InventoryStatus);
     }
 
+    [Fact]
+    public async Task SimultaneousGeneralBookingsNeverExceedInventory()
+    {
+        await using var factory = new BookingFactory();
+        using var firstAttendee = factory.Client("42", "Attendee");
+        using var secondAttendee = factory.Client("43", "Attendee");
+        var request = new
+        {
+            tickets = new[]
+            {
+                new { ticketTierId = (int?)7, name = "General Admission", unitPrice = 2500m, quantity = 2 }
+            }
+        };
+
+        var responses = await Task.WhenAll(
+            firstAttendee.PostAsJsonAsync("/api/booking/events/99/general-bookings", request),
+            secondAttendee.PostAsJsonAsync("/api/booking/events/99/general-bookings", request));
+
+        Assert.Equal(1, responses.Count(response => response.StatusCode == HttpStatusCode.OK));
+        Assert.Equal(1, responses.Count(response => response.StatusCode == HttpStatusCode.Conflict));
+    }
+
     private sealed record PlanResponse(int Id, int EventId, string Name, bool IsVisibleToAttendees, string Status, int Version, List<SectionResponse> Sections);
     private sealed record SectionResponse(int Id, string Name, int RowCount, int SeatsPerRow, string StartingRowLabel, int StartingSeatNumber, int? TicketTierId, decimal Price, int DisplayOrder, List<SeatResponse> Seats);
     private sealed record SeatResponse(string SeatCode, string RowLabel, int SeatNumber, int? TicketTierId, decimal Price, bool IsEnabled, string Status);
@@ -505,4 +647,19 @@ public class SeatingPlanApiTests
         }
         throw new InvalidOperationException("JPEG dimensions were not found.");
     }
+
+    private static async Task QueueTicketEmailAsync(HttpClient attendee, BookingConfirmationResponse confirmation)
+    {
+        var bookings = await attendee.GetFromJsonAsync<List<AttendeeBookingResponse>>("/api/booking/my-tickets");
+        var tickets = bookings!.Single(booking => booking.BookingId == confirmation.BookingId).Tickets;
+        var image = $"data:image/jpeg;base64,{Convert.ToBase64String(TestJpeg())}";
+        var response = await attendee.PostAsJsonAsync($"/api/booking/{confirmation.BookingId}/ticket-images", new
+        {
+            tickets = tickets.Select(ticket => new { bookingItemId = ticket.BookingItemId, ticketCode = ticket.TicketCode, image })
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    private static byte[] TestJpeg() =>
+    [0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x05, 0x78, 0x03, 0x84, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xD9];
 }

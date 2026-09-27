@@ -12,6 +12,7 @@ public class BookingDbContext(DbContextOptions<BookingDbContext> options) : DbCo
     public DbSet<BookingItem> BookingItems => Set<BookingItem>();
     public DbSet<SeatHold> SeatHolds => Set<SeatHold>();
     public DbSet<SeatHoldItem> SeatHoldItems => Set<SeatHoldItem>();
+    public DbSet<BookingInventoryLock> BookingInventoryLocks => Set<BookingInventoryLock>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -71,7 +72,7 @@ public class BookingDbContext(DbContextOptions<BookingDbContext> options) : DbCo
             entity.HasKey(item => item.Id);
             entity.Property(item => item.SeatCode).HasMaxLength(50).IsRequired();
             entity.Property(item => item.UnitPrice).HasPrecision(18, 2);
-            entity.HasIndex(item => item.SeatId);
+            entity.HasIndex(item => item.SeatId).IsUnique();
             entity.HasOne(item => item.Seat).WithMany().HasForeignKey(item => item.SeatId).OnDelete(DeleteBehavior.Restrict).IsRequired(false);
         });
 
@@ -89,6 +90,11 @@ public class BookingDbContext(DbContextOptions<BookingDbContext> options) : DbCo
             entity.HasKey(item => item.Id);
             entity.HasIndex(item => new { item.SeatHoldId, item.SeatId }).IsUnique();
             entity.HasOne(item => item.Seat).WithMany().HasForeignKey(item => item.SeatId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<BookingInventoryLock>(entity =>
+        {
+            entity.HasKey(item => item.EventId);
         });
     }
 }

@@ -6,7 +6,7 @@ namespace Exvo.BookingService.Services;
 
 public static class SeatGenerator
 {
-    public static async Task RegenerateAsync(BookingDbContext db, SeatingPlan plan, ISet<int>? activeSectionIds = null, CancellationToken cancellationToken = default)
+    public static async Task RegenerateAsync(BookingDbContext db, SeatingPlan plan, ISet<int>? activeSectionIds = null, CancellationToken cancellationToken = default, IReadOnlyDictionary<int, IReadOnlyList<string>>? rowLabelsBySection = null)
     {
         var sections = plan.Sections
             .Where(section => activeSectionIds is null || activeSectionIds.Contains(section.Id))
@@ -26,9 +26,12 @@ public static class SeatGenerator
 
         foreach (var section in sections)
         {
+            var rowLabels = rowLabelsBySection?.GetValueOrDefault(section.Id);
             for (var rowIndex = 0; rowIndex < section.RowCount; rowIndex++)
             {
-                var rowLabel = IncrementRowLabel(section.StartingRowLabel, rowIndex);
+                var rowLabel = rowLabels is { Count: > 0 } && rowIndex < rowLabels.Count
+                    ? rowLabels[rowIndex]
+                    : IncrementRowLabel(section.StartingRowLabel, rowIndex);
                 for (var seatIndex = 0; seatIndex < section.SeatsPerRow; seatIndex++)
                 {
                     var seatNumber = section.StartingSeatNumber + seatIndex;

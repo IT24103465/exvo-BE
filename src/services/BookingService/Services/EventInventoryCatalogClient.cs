@@ -10,7 +10,7 @@ public interface IEventInventoryCatalogClient
 }
 
 public sealed record EventTicketCatalog(int EventId, int AvailableTickets, IReadOnlyList<CatalogTicketTier> Tiers);
-public sealed record CatalogTicketTier(int? TicketTierId, string Name, decimal Price, int Quantity);
+public sealed record CatalogTicketTier(int? TicketTierId, string Name, decimal Price, int Quantity, bool IsUnlimited = false);
 public sealed record EventTicketSnapshot(
     int EventId,
     string Title,
@@ -88,12 +88,17 @@ public sealed class EventInventoryCatalogClient(IHttpClientFactory httpClientFac
         {
             if (tiersElement.ValueKind != JsonValueKind.Array) return [];
             return tiersElement.EnumerateArray()
-                .Select(tier => new CatalogTicketTier(
-                    GetInt(tier, "id") ?? GetInt(tier, "ticketTierId"),
-                    GetString(tier, "name") ?? "General Admission",
-                    GetDecimal(tier, "price") ?? 0m,
-                    Math.Max(0, GetInt(tier, "quantity") ?? 0)))
-                .Where(tier => tier.Quantity > 0)
+                .Select(tier =>
+                {
+                    var quantity = GetInt(tier, "quantity");
+                    var isUnlimited = quantity is null or <= 0;
+                    return new CatalogTicketTier(
+                        GetInt(tier, "id") ?? GetInt(tier, "ticketTierId"),
+                        GetString(tier, "name") ?? "General Admission",
+                        GetDecimal(tier, "price") ?? 0m,
+                        isUnlimited ? 0 : quantity!.Value,
+                        isUnlimited);
+                })
                 .ToList();
         }
     }
