@@ -86,6 +86,7 @@ services:
       ASPNETCORE_URLS: http://+:8080
       EXVO_BOOKING_MYSQL_CONNECTION_STRING: "Server=bookingdb;Port=3306;Database=exvo_booking_db;User=bookinguser;Password=${AZURE_MYSQL_PASSWORD:?Set AZURE_MYSQL_PASSWORD in .env.local or the shell};SslMode=None"
       CatalogService__BaseUrl: http://catalogservice:8080
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       Email__Host: ${EMAIL_HOST:-}
       Email__Port: ${EMAIL_PORT:-587}
       Email__UserName: ${EMAIL_USERNAME:-}
@@ -94,6 +95,8 @@ services:
       Email__EnableSsl: ${EMAIL_ENABLE_SSL:-true}
       Email__PickupDirectory: ${EMAIL_PICKUP_DIRECTORY:-notifications-outbox}
     depends_on:
+      kafka:
+        condition: service_healthy
       bookingdb:
         condition: service_healthy
     ports:
@@ -103,6 +106,20 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+
+  ticketservice:
+    build:
+      context: .
+      dockerfile: src/services/TicketService/Dockerfile
+    container_name: exvo_ticketservice
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
 
   bookingdb:
     image: mysql:8.0
