@@ -147,6 +147,10 @@ jobs:
         run: docker build --file src/services/CatalogService/Dockerfile --tag exvo/catalogservice:ci .
       - name: Build API Gateway image
         run: docker build --file src/gateway/ApiGateway/Dockerfile --tag exvo/apigateway:ci .
+      - name: Build TicketService image
+        run: docker build --file src/services/TicketService/Dockerfile --tag exvo/ticketservice:ci .
+      - name: Build BookingService image
+        run: docker build --file src/services/BookingService/Dockerfile --tag exvo/bookingservice:ci .
 
   code-coverage:
     name: Code Coverage

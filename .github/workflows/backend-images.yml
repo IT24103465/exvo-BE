@@ -5,10 +5,14 @@ on:
   push:
     branches:
       - devops/azure-catalog-gateway-deployment
+      - main
+      - develop
     paths:
       - 'src/services/AuthService/**'
       - 'src/services/CatalogService/**'
       - 'src/gateway/ApiGateway/**'
+      - 'src/services/TicketService/**'
+      - 'src/services/BookingService/**'
       - '.github/workflows/backend-images.yml'
 
 permissions:
@@ -71,3 +75,29 @@ jobs:
             ${{ secrets.ACR_LOGIN_SERVER }}/exvo-gateway:${{ github.sha }}
           cache-from: type=gha,scope=exvo-gateway
           cache-to: type=gha,mode=max,scope=exvo-gateway
+
+      - name: Build and push TicketService
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: src/services/TicketService/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/exvo-ticketservice:staging
+            ${{ secrets.ACR_LOGIN_SERVER }}/exvo-ticketservice:${{ github.sha }}
+          cache-from: type=gha,scope=exvo-ticketservice
+          cache-to: type=gha,mode=max,scope=exvo-ticketservice
+
+      - name: Build and push BookingService
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: src/services/BookingService/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/exvo-bookingservice:staging
+            ${{ secrets.ACR_LOGIN_SERVER }}/exvo-bookingservice:${{ github.sha }}
+          cache-from: type=gha,scope=exvo-bookingservice
+          cache-to: type=gha,mode=max,scope=exvo-bookingservice
