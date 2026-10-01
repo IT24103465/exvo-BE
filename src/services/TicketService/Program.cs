@@ -1,6 +1,7 @@
 using Confluent.Kafka;
 using System.Text.Json;
 
+// Pipeline smoke-test change; service behavior is unchanged.
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHostedService<BookingConfirmedConsumer>();
 
