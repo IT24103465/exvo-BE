@@ -1,0 +1,12 @@
+{
+  "name": "exvo-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Development scripts for the Exvo .NET platform",
+  "scripts": {
+    "restore": "dotnet restore ExvoPlatform.sln",
+    "build": "dotnet build ExvoPlatform.sln",
+    "test": "dotnet test ExvoPlatform.sln",
+    "check": "npm run build && npm run test"
+  }
+}

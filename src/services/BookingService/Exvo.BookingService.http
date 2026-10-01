@@ -1,0 +1,6 @@
+@Exvo.BookingService_HostAddress = http://localhost:5063
+
+GET {{Exvo.BookingService_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

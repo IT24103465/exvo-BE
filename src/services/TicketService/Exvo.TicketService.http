@@ -1,0 +1,6 @@
+@Exvo.TicketService_HostAddress = http://localhost:5230
+
+GET {{Exvo.TicketService_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
