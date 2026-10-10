@@ -215,14 +215,15 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
           cache: true
-          cache-dependency-path: "**/packages.lock.json"
+          cache-dependency-path: "**/*.csproj"
       - name: Restore solution assets
         run: dotnet restore "$SOLUTION"
       - name: Scan direct and transitive NuGet dependencies
         shell: bash
         run: |
           set -o pipefail
-          dotnet list "$SOLUTION" package --vulnerable --include-transitive 2>&1 | tee dependency-vulnerabilities.txt
+          touch dependency-vulnerabilities.txt
+          dotnet list ExvoPlatform.sln package --vulnerable --include-transitive 2>&1 | tee dependency-vulnerabilities.txt
           if grep -Eiq 'Severity:[[:space:]]*(High|Critical)' dependency-vulnerabilities.txt; then
             echo 'High or critical NuGet vulnerabilities were found.' >&2
             exit 1
