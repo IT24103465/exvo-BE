@@ -627,6 +627,292 @@ app.MapGet("/api/checkin/event/{eventId:int}/stats", async (
 .WithOpenApi();
 
 // =============================================================================
+// 5. GET /api/checkin/analytics/event/{eventId}/summary – Event Analytics Summary
+// =============================================================================
+app.MapGet("/api/checkin/analytics/event/{eventId:int}/summary", async (
+    int eventId,
+    ClaimsPrincipal user,
+    CheckInDbContext db,
+    IHttpClientFactory httpClientFactory) =>
+{
+    if (eventId <= 0) return Results.BadRequest(new ErrorDto("Valid EventId is required."));
+
+    if (!await ValidateEventOwnershipAsync(eventId, user, httpClientFactory))
+        return Results.Json(new ErrorDto("Access denied. You do not own this event."), statusCode: 403);
+
+    var catalogClient = httpClientFactory.CreateClient("CatalogService");
+    CatalogEventResponse? eventData = null;
+    try
+    {
+        var catResponse = await catalogClient.GetAsync($"/api/catalog/events/{eventId}/ticket-snapshot");
+        if (catResponse.IsSuccessStatusCode)
+        {
+            eventData = await catResponse.Content.ReadFromJsonAsync<CatalogEventResponse>();
+        }
+    }
+    catch { }
+
+    if (eventData is null)
+        return Results.NotFound(new ErrorDto("Event not found."));
+
+    var bookingClient = httpClientFactory.CreateClient("BookingService");
+    EventBookingMetricsResponse? bookingMetrics = null;
+    try
+    {
+        var bookResponse = await bookingClient.GetAsync($"/api/booking/internal/events/{eventId}/metrics");
+        if (bookResponse.IsSuccessStatusCode)
+        {
+            bookingMetrics = await bookResponse.Content.ReadFromJsonAsync<EventBookingMetricsResponse>();
+        }
+    }
+    catch { }
+
+    var totalTicketsSold = bookingMetrics?.TotalTicketsSold ?? 0;
+    var totalRevenue = bookingMetrics?.TotalRevenue ?? 0m;
+    var currency = bookingMetrics?.Currency ?? "LKR";
+    var totalRefundedTickets = bookingMetrics?.CancelledTicketsCount ?? 0;
+    var totalRefundedAmount = bookingMetrics?.CancelledAmount ?? 0m;
+
+    // Total capacity = available tickets from catalog + sold tickets (or tier sum if defined)
+    var catalogCapacity = eventData.AvailableTickets;
+    var totalCapacity = Math.Max(catalogCapacity, totalTicketsSold + (catalogCapacity > totalTicketsSold ? catalogCapacity - totalTicketsSold : 0));
+    if (totalCapacity < totalTicketsSold) totalCapacity = totalTicketsSold;
+    var remainingTickets = Math.Max(0, totalCapacity - totalTicketsSold);
+
+    var totalCheckedIn = await db.ScannedTickets
+        .AsNoTracking()
+        .CountAsync(t => t.EventId == eventId && t.Status == ScannedTicketStatus.CheckedIn);
+
+    var totalAttendeesExpected = totalTicketsSold;
+    var attendancePercentage = totalAttendeesExpected > 0
+        ? Math.Round((double)totalCheckedIn / totalAttendeesExpected * 100.0, 2)
+        : 0.0;
+
+    return Results.Ok(new EventAnalyticsSummaryResponse(
+        EventId: eventId,
+        Title: eventData.Title ?? $"Event #{eventId}",
+        TotalCapacity: totalCapacity,
+        TotalTicketsSold: totalTicketsSold,
+        RemainingTickets: remainingTickets,
+        TotalRevenue: totalRevenue,
+        Currency: currency,
+        TotalCheckedIn: totalCheckedIn,
+        TotalAttendeesExpected: totalAttendeesExpected,
+        AttendancePercentage: attendancePercentage,
+        TotalRefundedTickets: totalRefundedTickets,
+        TotalRefundedAmount: totalRefundedAmount,
+        LastUpdatedUtc: DateTime.UtcNow
+    ));
+})
+.RequireAuthorization("CheckInScannerAccess")
+.WithName("GetEventAnalyticsSummary")
+.WithOpenApi();
+
+// =============================================================================
+// 6. GET /api/checkin/analytics/event/{eventId}/sales – Event Sales & Revenue Analytics
+// =============================================================================
+app.MapGet("/api/checkin/analytics/event/{eventId:int}/sales", async (
+    int eventId,
+    ClaimsPrincipal user,
+    CheckInDbContext db,
+    IHttpClientFactory httpClientFactory) =>
+{
+    if (eventId <= 0) return Results.BadRequest(new ErrorDto("Valid EventId is required."));
+
+    if (!await ValidateEventOwnershipAsync(eventId, user, httpClientFactory))
+        return Results.Json(new ErrorDto("Access denied. You do not own this event."), statusCode: 403);
+
+    var catalogClient = httpClientFactory.CreateClient("CatalogService");
+    CatalogEventResponse? eventData = null;
+    try
+    {
+        var catResponse = await catalogClient.GetAsync($"/api/catalog/events/{eventId}/ticket-snapshot");
+        if (catResponse.IsSuccessStatusCode)
+        {
+            eventData = await catResponse.Content.ReadFromJsonAsync<CatalogEventResponse>();
+        }
+    }
+    catch { }
+
+    if (eventData is null)
+        return Results.NotFound(new ErrorDto("Event not found."));
+
+    var bookingClient = httpClientFactory.CreateClient("BookingService");
+    EventBookingMetricsResponse? bookingMetrics = null;
+    try
+    {
+        var bookResponse = await bookingClient.GetAsync($"/api/booking/internal/events/{eventId}/metrics");
+        if (bookResponse.IsSuccessStatusCode)
+        {
+            bookingMetrics = await bookResponse.Content.ReadFromJsonAsync<EventBookingMetricsResponse>();
+        }
+    }
+    catch { }
+
+    var totalTicketsSold = bookingMetrics?.TotalTicketsSold ?? 0;
+    var totalRevenue = bookingMetrics?.TotalRevenue ?? 0m;
+    var currency = bookingMetrics?.Currency ?? "LKR";
+    var confirmedBookingsCount = bookingMetrics?.ConfirmedBookingsCount ?? 0;
+    var cancelledBookingsCount = bookingMetrics?.CancelledBookingsCount ?? 0;
+    var refundedTicketsCount = bookingMetrics?.CancelledTicketsCount ?? 0;
+    var refundedAmount = bookingMetrics?.CancelledAmount ?? 0m;
+
+    var catalogCapacity = eventData.AvailableTickets;
+    var totalCapacity = Math.Max(catalogCapacity, totalTicketsSold);
+    var remainingTickets = Math.Max(0, totalCapacity - totalTicketsSold);
+
+    var tierSalesList = new List<TierSalesMetricsDto>();
+    if (bookingMetrics?.TierMetrics != null && bookingMetrics.TierMetrics.Count > 0)
+    {
+        foreach (var tm in bookingMetrics.TierMetrics)
+        {
+            tierSalesList.Add(new TierSalesMetricsDto(
+                TicketTierId: tm.TicketTierId,
+                TierName: tm.TierName,
+                UnitPrice: tm.UnitPrice,
+                SoldQuantity: tm.SoldQuantity,
+                TotalCapacity: tm.SoldQuantity, // Tier capacity fallback
+                RemainingQuantity: 0,
+                Revenue: tm.Revenue
+            ));
+        }
+    }
+    else if (totalTicketsSold > 0)
+    {
+        tierSalesList.Add(new TierSalesMetricsDto(
+            TicketTierId: null,
+            TierName: "General Admission",
+            UnitPrice: eventData.Price,
+            SoldQuantity: totalTicketsSold,
+            TotalCapacity: totalCapacity,
+            RemainingQuantity: remainingTickets,
+            Revenue: totalRevenue
+        ));
+    }
+
+    return Results.Ok(new EventSalesAnalyticsResponse(
+        EventId: eventId,
+        TotalTicketsSold: totalTicketsSold,
+        TotalCapacity: totalCapacity,
+        RemainingTickets: remainingTickets,
+        TotalRevenue: totalRevenue,
+        Currency: currency,
+        ConfirmedBookingsCount: confirmedBookingsCount,
+        CancelledBookingsCount: cancelledBookingsCount,
+        RefundedTicketsCount: refundedTicketsCount,
+        RefundedAmount: refundedAmount,
+        TierSales: tierSalesList,
+        LastUpdatedUtc: DateTime.UtcNow
+    ));
+})
+.RequireAuthorization("CheckInScannerAccess")
+.WithName("GetEventSalesAnalytics")
+.WithOpenApi();
+
+// =============================================================================
+// 7. GET /api/checkin/analytics/event/{eventId}/attendance – Event Attendance Analytics
+// =============================================================================
+app.MapGet("/api/checkin/analytics/event/{eventId:int}/attendance", async (
+    int eventId,
+    ClaimsPrincipal user,
+    CheckInDbContext db,
+    IHttpClientFactory httpClientFactory) =>
+{
+    if (eventId <= 0) return Results.BadRequest(new ErrorDto("Valid EventId is required."));
+
+    if (!await ValidateEventOwnershipAsync(eventId, user, httpClientFactory))
+        return Results.Json(new ErrorDto("Access denied. You do not own this event."), statusCode: 403);
+
+    var bookingClient = httpClientFactory.CreateClient("BookingService");
+    EventBookingMetricsResponse? bookingMetrics = null;
+    try
+    {
+        var bookResponse = await bookingClient.GetAsync($"/api/booking/internal/events/{eventId}/metrics");
+        if (bookResponse.IsSuccessStatusCode)
+        {
+            bookingMetrics = await bookResponse.Content.ReadFromJsonAsync<EventBookingMetricsResponse>();
+        }
+    }
+    catch { }
+
+    var totalTicketsSold = bookingMetrics?.TotalTicketsSold ?? 0;
+
+    var scannedTickets = await db.ScannedTickets
+        .AsNoTracking()
+        .Where(t => t.EventId == eventId)
+        .ToListAsync();
+
+    var totalCheckedIn = scannedTickets.Count(t => t.Status == ScannedTicketStatus.CheckedIn);
+    var totalRejectedScans = scannedTickets.Count(t => t.Status == ScannedTicketStatus.Rejected);
+    var totalNotCheckedIn = Math.Max(0, totalTicketsSold - totalCheckedIn);
+
+    var attendancePercentage = totalTicketsSold > 0
+        ? Math.Round((double)totalCheckedIn / totalTicketsSold * 100.0, 2)
+        : 0.0;
+
+    // Group check-ins by hour
+    var hourlyCheckIns = scannedTickets
+        .Where(t => t.Status == ScannedTicketStatus.CheckedIn)
+        .GroupBy(t => new DateTime(t.ScannedAt.Year, t.ScannedAt.Month, t.ScannedAt.Day, t.ScannedAt.Hour, 0, 0, DateTimeKind.Utc))
+        .OrderBy(g => g.Key)
+        .Select(g => new HourlyCheckInDto(
+            HourUtc: g.Key,
+            CheckInCount: g.Count()
+        ))
+        .ToList();
+
+    // Group check-ins by tier / ticket type
+    var tierAttendanceList = new List<TierAttendanceDto>();
+    var checkedInByTier = scannedTickets
+        .Where(t => t.Status == ScannedTicketStatus.CheckedIn)
+        .GroupBy(t => string.IsNullOrWhiteSpace(t.TicketType) ? "General Admission" : t.TicketType)
+        .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+
+    if (bookingMetrics?.TierMetrics != null && bookingMetrics.TierMetrics.Count > 0)
+    {
+        foreach (var tm in bookingMetrics.TierMetrics)
+        {
+            var tierName = tm.TierName;
+            var checkedInCount = checkedInByTier.TryGetValue(tierName, out var count) ? count : 0;
+            var tierAttendancePct = tm.SoldQuantity > 0
+                ? Math.Round((double)checkedInCount / tm.SoldQuantity * 100.0, 2)
+                : 0.0;
+
+            tierAttendanceList.Add(new TierAttendanceDto(
+                TicketType: tierName,
+                TotalSold: tm.SoldQuantity,
+                CheckedInCount: checkedInCount,
+                AttendancePercentage: tierAttendancePct
+            ));
+        }
+    }
+    else
+    {
+        tierAttendanceList.Add(new TierAttendanceDto(
+            TicketType: "General Admission",
+            TotalSold: totalTicketsSold,
+            CheckedInCount: totalCheckedIn,
+            AttendancePercentage: attendancePercentage
+        ));
+    }
+
+    return Results.Ok(new EventAttendanceAnalyticsResponse(
+        EventId: eventId,
+        TotalTicketsSold: totalTicketsSold,
+        TotalCheckedIn: totalCheckedIn,
+        TotalNotCheckedIn: totalNotCheckedIn,
+        TotalRejectedScans: totalRejectedScans,
+        AttendancePercentage: attendancePercentage,
+        HourlyCheckIns: hourlyCheckIns,
+        TierAttendance: tierAttendanceList,
+        LastUpdatedUtc: DateTime.UtcNow
+    ));
+})
+.RequireAuthorization("CheckInScannerAccess")
+.WithName("GetEventAttendanceAnalytics")
+.WithOpenApi();
+
+// =============================================================================
 // Backward compatibility coordinator endpoints & assignments
 // =============================================================================
 app.MapGet("/api/checkin/coordinator/events", async (

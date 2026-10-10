@@ -546,6 +546,56 @@ app.MapGet("/api/booking/internal/tickets/{ticketCode}", async (string ticketCod
     });
 });
 
+// Internal endpoint called by CheckInService / Analytics to retrieve confirmed and cancelled booking metrics
+app.MapGet("/api/booking/internal/events/{eventId:int}/metrics", async (int eventId, BookingDbContext db, CancellationToken ct) =>
+{
+    var confirmedBookings = await db.Bookings
+        .AsNoTracking()
+        .Include(b => b.Items)
+        .Where(b => b.EventId == eventId && b.Status == BookingStatus.Confirmed)
+        .ToListAsync(ct);
+
+    var cancelledBookings = await db.Bookings
+        .AsNoTracking()
+        .Include(b => b.Items)
+        .Where(b => b.EventId == eventId && b.Status == BookingStatus.Cancelled)
+        .ToListAsync(ct);
+
+    var totalTicketsSold = confirmedBookings.Sum(b => b.Items.Count);
+    var totalRevenue = confirmedBookings.Sum(b => b.TotalAmount);
+    var currency = confirmedBookings.FirstOrDefault()?.Currency ?? "LKR";
+
+    var cancelledBookingsCount = cancelledBookings.Count;
+    var cancelledTicketsCount = cancelledBookings.Sum(b => b.Items.Count);
+    var cancelledAmount = cancelledBookings.Sum(b => b.TotalAmount);
+
+    var confirmedItems = confirmedBookings.SelectMany(b => b.Items).ToList();
+    var tierMetrics = confirmedItems
+        .GroupBy(i => new { i.TicketTierId, TierName = i.SeatCode ?? "General Admission", i.UnitPrice })
+        .Select(g => new
+        {
+            ticketTierId = g.Key.TicketTierId,
+            tierName = g.Key.TierName,
+            unitPrice = g.Key.UnitPrice,
+            soldQuantity = g.Count(),
+            revenue = g.Sum(item => item.UnitPrice)
+        })
+        .ToList();
+
+    return Results.Ok(new
+    {
+        eventId,
+        totalTicketsSold,
+        totalRevenue,
+        currency,
+        confirmedBookingsCount = confirmedBookings.Count,
+        cancelledBookingsCount,
+        cancelledTicketsCount,
+        cancelledAmount,
+        tierMetrics
+    });
+});
+
 app.Run();
 
 

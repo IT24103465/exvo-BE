@@ -618,6 +618,31 @@ public class SeatingPlanApiTests
         Assert.Equal(1, responses.Count(response => response.StatusCode == HttpStatusCode.Conflict));
     }
 
+    [Fact]
+    public async Task InternalEventMetricsReturnsAccurateMetrics()
+    {
+        await using var factory = new BookingFactory();
+        using var attendee = factory.Client("42", "Attendee");
+        var bookingResponse = await attendee.PostAsJsonAsync("/api/booking/events/99/general-bookings", new
+        {
+            tickets = new[]
+            {
+                new { ticketTierId = (int?)7, name = "General Admission", unitPrice = 2500m, quantity = 1 }
+            }
+        });
+        Assert.Equal(HttpStatusCode.OK, bookingResponse.StatusCode);
+
+        using var internalClient = factory.CreateClient();
+        var metricsResponse = await internalClient.GetAsync("/api/booking/internal/events/99/metrics");
+        Assert.Equal(HttpStatusCode.OK, metricsResponse.StatusCode);
+
+        var metricsJson = await metricsResponse.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>();
+        Assert.Equal(99, metricsJson.GetProperty("eventId").GetInt32());
+        Assert.True(metricsJson.GetProperty("totalTicketsSold").GetInt32() >= 1);
+        Assert.True(metricsJson.GetProperty("totalRevenue").GetDecimal() >= 2500m);
+        Assert.Equal("LKR", metricsJson.GetProperty("currency").GetString());
+    }
+
     private sealed record PlanResponse(int Id, int EventId, string Name, bool IsVisibleToAttendees, string Status, int Version, List<SectionResponse> Sections);
     private sealed record SectionResponse(int Id, string Name, int RowCount, int SeatsPerRow, string StartingRowLabel, int StartingSeatNumber, int? TicketTierId, decimal Price, int DisplayOrder, List<SeatResponse> Seats);
     private sealed record SeatResponse(string SeatCode, string RowLabel, int SeatNumber, int? TicketTierId, decimal Price, bool IsEnabled, string Status);

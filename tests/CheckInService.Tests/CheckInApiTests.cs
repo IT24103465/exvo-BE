@@ -166,6 +166,42 @@ public class MockHttpMessageHandler : HttpMessageHandler
             });
         }
 
+        if (uri.Contains("/api/booking/internal/events/10/metrics"))
+        {
+            var json = """
+            {
+                "eventId": 10,
+                "totalTicketsSold": 50,
+                "totalRevenue": 250000.00,
+                "currency": "LKR",
+                "confirmedBookingsCount": 20,
+                "cancelledBookingsCount": 2,
+                "cancelledTicketsCount": 4,
+                "cancelledAmount": 20000.00,
+                "tierMetrics": [
+                    {
+                        "ticketTierId": 1,
+                        "tierName": "VIP",
+                        "unitPrice": 10000.00,
+                        "soldQuantity": 10,
+                        "revenue": 100000.00
+                    },
+                    {
+                        "ticketTierId": 2,
+                        "tierName": "General Admission",
+                        "unitPrice": 3750.00,
+                        "soldQuantity": 40,
+                        "revenue": 150000.00
+                    }
+                ]
+            }
+            """;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            });
+        }
+
         return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
     }
 }
@@ -334,5 +370,89 @@ public class CheckInApiTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.Equal(10, stats.EventId);
         Assert.True(stats.TotalCheckedIn >= 1);
         Assert.True(stats.TotalScanned >= 1);
+    }
+
+    [Fact]
+    public async Task GetEventAnalyticsSummary_AuthorizedOwner_ReturnsAccurateSummary()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GenerateJwt(100, "Organizer"));
+
+        var response = await client.GetAsync("/api/checkin/analytics/event/10/summary");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var summary = await response.Content.ReadFromJsonAsync<EventAnalyticsSummaryResponse>();
+        Assert.NotNull(summary);
+        Assert.Equal(10, summary.EventId);
+        Assert.Equal("Summer Festival", summary.Title);
+        Assert.Equal(50, summary.TotalTicketsSold);
+        Assert.Equal(250000.00m, summary.TotalRevenue);
+        Assert.Equal("LKR", summary.Currency);
+        Assert.Equal(4, summary.TotalRefundedTickets);
+        Assert.Equal(20000.00m, summary.TotalRefundedAmount);
+        Assert.True(summary.AttendancePercentage >= 0.0);
+    }
+
+    [Fact]
+    public async Task GetEventAnalyticsSummary_UnauthorizedOwner_ReturnsForbidden()
+    {
+        var client = _factory.CreateClient();
+        // User 999 does not own event 10
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GenerateJwt(999, "Organizer"));
+
+        var response = await client.GetAsync("/api/checkin/analytics/event/10/summary");
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetEventSalesAnalytics_AuthorizedOwner_ReturnsCorrectSalesAndTierBreakdown()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GenerateJwt(100, "Organizer"));
+
+        var response = await client.GetAsync("/api/checkin/analytics/event/10/sales");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var sales = await response.Content.ReadFromJsonAsync<EventSalesAnalyticsResponse>();
+        Assert.NotNull(sales);
+        Assert.Equal(10, sales.EventId);
+        Assert.Equal(50, sales.TotalTicketsSold);
+        Assert.Equal(250000.00m, sales.TotalRevenue);
+        Assert.Equal(20, sales.ConfirmedBookingsCount);
+        Assert.Equal(2, sales.CancelledBookingsCount);
+        Assert.Equal(4, sales.RefundedTicketsCount);
+        Assert.Equal(20000.00m, sales.RefundedAmount);
+        Assert.Equal(2, sales.TierSales.Count);
+        Assert.Equal("VIP", sales.TierSales[0].TierName);
+        Assert.Equal(100000.00m, sales.TierSales[0].Revenue);
+        Assert.Equal(10, sales.TierSales[0].SoldQuantity);
+    }
+
+    [Fact]
+    public async Task GetEventAttendanceAnalytics_AuthorizedOwner_ReturnsCheckInBreakdownAndTimeline()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GenerateJwt(100, "Organizer"));
+
+        var response = await client.GetAsync("/api/checkin/analytics/event/10/attendance");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var attendance = await response.Content.ReadFromJsonAsync<EventAttendanceAnalyticsResponse>();
+        Assert.NotNull(attendance);
+        Assert.Equal(10, attendance.EventId);
+        Assert.Equal(50, attendance.TotalTicketsSold);
+        Assert.True(attendance.AttendancePercentage >= 0.0);
+        Assert.NotNull(attendance.HourlyCheckIns);
+        Assert.NotNull(attendance.TierAttendance);
+    }
+
+    [Fact]
+    public async Task GetEventAttendanceAnalytics_UnauthorizedOwner_ReturnsForbidden()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GenerateJwt(999, "Organizer"));
+
+        var response = await client.GetAsync("/api/checkin/analytics/event/10/attendance");
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 }
