@@ -504,7 +504,50 @@ app.MapGet("/api/booking/organizer/events/{eventId:int}/seating-plan", async (in
     return plan is null ? Results.NotFound() : Results.Ok(ToResponse(plan));
 }).RequireAuthorization("Organizer");
 
+// Internal endpoint called by CheckInService to validate a ticket code during coordinator check-in.
+// Not exposed via API Gateway — service-to-service only.
+app.MapGet("/api/booking/internal/tickets/{ticketCode}", async (string ticketCode, int? eventId, BookingDbContext db, CancellationToken ct) =>
+{
+    // TicketCode format: {BookingReference}-{BookingItemId}
+    // Parse itemId from last segment
+    var lastDash = ticketCode.LastIndexOf('-');
+    if (lastDash < 0 || !int.TryParse(ticketCode[(lastDash + 1)..], out var itemId))
+        return Results.NotFound(new { status = "INVALID", message = "Ticket code format is invalid." });
+
+    var bookingRef = ticketCode[..lastDash];
+
+    var item = await db.BookingItems
+        .AsNoTracking()
+        .Include(i => i.Booking)
+        .Include(i => i.Seat)
+        .FirstOrDefaultAsync(i =>
+            i.Id == itemId &&
+            i.Booking.BookingReference == bookingRef &&
+            i.Booking.Status == BookingStatus.Confirmed, ct);
+
+    if (item is null)
+        return Results.NotFound(new { status = "INVALID" });
+
+    // Optional event filter
+    if (eventId.HasValue && item.Booking.EventId != eventId.Value)
+        return Results.NotFound(new { status = "INVALID", message = "Ticket belongs to a different event." });
+
+    return Results.Ok(new
+    {
+        ticketCode,
+        ticketId = item.Id,
+        eventId = item.Booking.EventId,
+        bookingId = item.BookingId,
+        attendeeId = item.Booking.AttendeeUserId,
+        attendeeName = item.Booking.AttendeeEmail ?? $"User #{item.Booking.AttendeeUserId}",
+        ticketType = item.SeatCode ?? "General Admission",
+        seatCode = item.Seat != null ? item.Seat.SeatCode : (item.SeatCode ?? "GA"),
+        status = item.Booking.Status.ToString()
+    });
+});
+
 app.Run();
+
 
 static async Task<IResult> SavePlan(int eventId, SeatingPlanRequest request, ClaimsPrincipal user, BookingDbContext db, IEventOwnershipClient ownership, IEventInventoryCatalogClient catalog, CancellationToken ct)
 {
