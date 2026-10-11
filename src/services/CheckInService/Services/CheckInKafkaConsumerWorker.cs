@@ -46,8 +46,8 @@ public class CheckInKafkaConsumerWorker : BackgroundService
         };
 
         using var consumer = new ConsumerBuilder<string, string>(config).Build();
-        consumer.Subscribe(new[] { "ticket.cancelled", "event.updated" });
-        _logger.LogInformation("Subscribed to ticket.cancelled and event.updated at {Brokers}.", brokers);
+        consumer.Subscribe(new[] { "ticket.cancelled", "event.updated", "booking.confirmed.v1" });
+        _logger.LogInformation("Subscribed to ticket.cancelled, event.updated, and booking.confirmed.v1 at {Brokers}.", brokers);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -94,6 +94,23 @@ public class CheckInKafkaConsumerWorker : BackgroundService
                                 EventId = updatedEvent.EventId,
                                 UserId = 0,
                                 Details = $"Event updated: {updatedEvent.Title}",
+                                TimestampUtc = DateTime.UtcNow
+                            });
+                            db.SaveChanges();
+                        }
+                    }
+                    else if (topic == "booking.confirmed.v1")
+                    {
+                        var bookingEvent = JsonSerializer.Deserialize<BookingConfirmedEvent>(value);
+                        if (bookingEvent != null)
+                        {
+                            db.AuditLogs.Add(new Models.CheckInAuditLog
+                            {
+                                Action = "BookingConfirmedReceived",
+                                TicketId = null,
+                                EventId = bookingEvent.EventId,
+                                UserId = bookingEvent.AttendeeUserId,
+                                Details = $"Booking confirmed received: Ref={bookingEvent.BookingReference}, Amount={bookingEvent.TotalAmount} {bookingEvent.Currency}",
                                 TimestampUtc = DateTime.UtcNow
                             });
                             db.SaveChanges();

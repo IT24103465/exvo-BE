@@ -31,3 +31,15 @@ public sealed record EventUpdatedEvent(
     string? Status,
     DateTime UpdatedAt
 );
+
+public sealed record BookingConfirmedEvent(
+    int BookingId,
+    string BookingReference,
+    int EventId,
+    int AttendeeUserId,
+    string AttendeeEmail,
+    decimal TotalAmount,
+    string Currency,
+    DateTime ConfirmedAtUtc
+);
+
