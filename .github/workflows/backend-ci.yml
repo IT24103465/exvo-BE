@@ -151,6 +151,8 @@ jobs:
         run: docker build --file src/services/TicketService/Dockerfile --tag exvo/ticketservice:ci .
       - name: Build BookingService image
         run: docker build --file src/services/BookingService/Dockerfile --tag exvo/bookingservice:ci .
+      - name: Build CheckInService image
+        run: docker build --file src/services/CheckInService/Dockerfile --tag exvo/checkinservice:ci .
 
   code-coverage:
     name: Code Coverage
