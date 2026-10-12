@@ -5,6 +5,34 @@ public record VerifyTicketRequest(
     int EventId
 );
 
+public static class TicketValidationStatus
+{
+    public const string Valid = "VALID";
+    public const string Invalid = "INVALID";
+    public const string WrongEvent = "WRONG_EVENT";
+    public const string AlreadyUsed = "ALREADY_USED";
+    public const string NotEligible = "NOT_ELIGIBLE";
+}
+
+public record ValidateTicketRequest(
+    string Code,
+    int EventId
+);
+
+public record ValidateTicketResponse(
+    bool IsValid,
+    string Status, // VALID, INVALID, WRONG_EVENT, ALREADY_USED, NOT_ELIGIBLE
+    string Message,
+    int? TicketId,
+    int? EventId,
+    int? BookingId,
+    int? AttendeeId,
+    string? AttendeeName,
+    string? TicketType,
+    string? SeatCode,
+    DateTime? ScannedAt
+);
+
 public record VerifyTicketResponse(
     bool IsValid,
     string Status, // "Valid", "AlreadyCheckedIn", "Cancelled", "InvalidEvent", "NotFound"

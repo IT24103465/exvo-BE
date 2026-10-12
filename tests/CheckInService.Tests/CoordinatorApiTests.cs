@@ -112,10 +112,21 @@ public class MockCatalogHandler : HttpMessageHandler
     }
 }
 
+public sealed class MutableTimeProvider : TimeProvider
+{
+    public DateTimeOffset Now { get; set; }
+    public MutableTimeProvider(DateTimeOffset now) => Now = now;
+    public override DateTimeOffset GetUtcNow() => Now;
+}
+
 public class CheckInFactory : WebApplicationFactory<Program>
 {
     public const string Key = "CheckIn_Tests_Signing_Key_Only_At_Least_32_Bytes!";
     private readonly string _databaseName = Guid.NewGuid().ToString();
+
+    // Default: 2026-11-15 09:30 Sri Lanka time (+05:30) = event 1's day.
+    public static readonly DateTimeOffset DefaultNow = new(2026, 11, 15, 4, 0, 0, TimeSpan.Zero);
+    public MutableTimeProvider Clock { get; } = new(DefaultNow);
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -135,6 +146,9 @@ public class CheckInFactory : WebApplicationFactory<Program>
                 options.TokenValidationParameters.ValidIssuer = "ExvoAuthService";
                 options.TokenValidationParameters.ValidAudience = "ExvoPlatform";
             });
+
+            services.RemoveAll<TimeProvider>();
+            services.AddSingleton<TimeProvider>(Clock);
 
             services.RemoveAll<DbContextOptions<CheckInDbContext>>();
             services.RemoveAll<CheckInDbContext>();
@@ -171,6 +185,16 @@ public class CheckInFactory : WebApplicationFactory<Program>
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
             "Bearer", new JwtSecurityTokenHandler().WriteToken(jwt));
         return client;
+    }
+
+    public async Task SeedAssignmentsIfNeededAsync()
+    {
+        using (var scope = Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CheckInDbContext>();
+            if (await db.CoordinatorAssignments.AnyAsync(a => a.Id == 1)) return;
+        }
+        await SeedAssignmentsAsync();
     }
 
     public async Task SeedAssignmentsAsync()
@@ -247,7 +271,7 @@ public class CoordinatorApiTests : IClassFixture<CheckInFactory>
     [Fact]
     public async Task GetAssignedEvents_CoordinatorWithAssignments_ReturnsActiveEvents()
     {
-        await _factory.SeedAssignmentsAsync();
+        await _factory.SeedAssignmentsIfNeededAsync();
         var client = _factory.CreateUserClient(id: "50", role: "Coordinator");
 
         var response = await client.GetAsync("/api/checkin/coordinator/events");
@@ -389,16 +413,106 @@ public class CoordinatorApiTests : IClassFixture<CheckInFactory>
         var organizerClient = _factory.CreateUserClient(id: "11", role: "Organizer");
         var coordClient = _factory.CreateUserClient(id: "60", role: "Coordinator");
 
-        // Coordinator 60 initially has access to Event 2
-        var initialAccess = await coordClient.GetAsync("/api/checkin/coordinator/events/2/access");
-        Assert.Equal(HttpStatusCode.OK, initialAccess.StatusCode);
+        // Move clock to Event 2's day (2026-12-01 local)
+        _factory.Clock.Now = new DateTimeOffset(2026, 12, 1, 6, 0, 0, TimeSpan.Zero);
+        try
+        {
+            // Coordinator 60 initially has access to Event 2
+            var initialAccess = await coordClient.GetAsync("/api/checkin/coordinator/events/2/access");
+            Assert.Equal(HttpStatusCode.OK, initialAccess.StatusCode);
 
-        // Revoke assignment 3 (Coordinator 60, Event 2)
-        var revokeResponse = await organizerClient.DeleteAsync("/api/checkin/assignments/3");
-        Assert.Equal(HttpStatusCode.NoContent, revokeResponse.StatusCode);
+            // Revoke assignment 3 (Coordinator 60, Event 2)
+            var revokeResponse = await organizerClient.DeleteAsync("/api/checkin/assignments/3");
+            Assert.Equal(HttpStatusCode.NoContent, revokeResponse.StatusCode);
 
-        // Verify access is now denied
-        var revokedAccess = await coordClient.GetAsync("/api/checkin/coordinator/events/2/access");
-        Assert.Equal(HttpStatusCode.Forbidden, revokedAccess.StatusCode);
+            // Verify access is now denied
+            var revokedAccess = await coordClient.GetAsync("/api/checkin/coordinator/events/2/access");
+            Assert.Equal(HttpStatusCode.Forbidden, revokedAccess.StatusCode);
+        }
+        finally
+        {
+            _factory.Clock.Now = CheckInFactory.DefaultNow;
+        }
+    }
+
+    [Fact]
+    public async Task EventDay_ListMarksEventAsToday_AndScannerCanLaunch()
+    {
+        await _factory.SeedAssignmentsIfNeededAsync();
+        var client = _factory.CreateUserClient(id: "50", role: "Coordinator");
+
+        var events = await client.GetFromJsonAsync<List<AssignedEventDto>>("/api/checkin/coordinator/events");
+        var ev = Assert.Single(events!, e => e.Id == 1);
+        Assert.Equal(ScannerEventCategory.Today, ev.ScannerCategory);
+        Assert.True(ev.CanLaunchScanner);
+
+        var access = await client.GetAsync("/api/checkin/coordinator/events/1/access");
+        Assert.Equal(HttpStatusCode.OK, access.StatusCode);
+    }
+
+    [Fact]
+    public async Task BeforeEventDay_EventIsUpcoming_AndScannerLaunchDenied()
+    {
+        await _factory.SeedAssignmentsIfNeededAsync();
+        var client = _factory.CreateUserClient(id: "50", role: "Coordinator");
+        _factory.Clock.Now = new DateTimeOffset(2026, 11, 14, 12, 0, 0, TimeSpan.Zero); // Nov 14 17:30 local
+        try
+        {
+            var events = await client.GetFromJsonAsync<List<AssignedEventDto>>("/api/checkin/coordinator/events");
+            var ev = Assert.Single(events!, e => e.Id == 1);
+            Assert.Equal(ScannerEventCategory.Upcoming, ev.ScannerCategory);
+            Assert.False(ev.CanLaunchScanner);
+
+            var access = await client.GetAsync("/api/coordinator/events/1/access");
+            Assert.Equal(HttpStatusCode.Forbidden, access.StatusCode);
+            var error = await access.Content.ReadFromJsonAsync<ErrorDto>();
+            Assert.Equal("The scanner is only available on the event day.", error!.Message);
+        }
+        finally
+        {
+            _factory.Clock.Now = CheckInFactory.DefaultNow;
+        }
+    }
+
+    [Fact]
+    public async Task AfterEventDay_EventIsPast_AndScannerLaunchDenied()
+    {
+        await _factory.SeedAssignmentsIfNeededAsync();
+        var client = _factory.CreateUserClient(id: "50", role: "Coordinator");
+        _factory.Clock.Now = new DateTimeOffset(2026, 11, 15, 19, 0, 0, TimeSpan.Zero); // Nov 16 00:30 local
+        try
+        {
+            var events = await client.GetFromJsonAsync<List<AssignedEventDto>>("/api/checkin/coordinator/events");
+            var ev = Assert.Single(events!, e => e.Id == 1);
+            Assert.Equal(ScannerEventCategory.Past, ev.ScannerCategory);
+            Assert.False(ev.CanLaunchScanner);
+
+            var access = await client.GetAsync("/api/checkin/coordinator/events/1/access");
+            Assert.Equal(HttpStatusCode.Forbidden, access.StatusCode);
+            var error = await access.Content.ReadFromJsonAsync<ErrorDto>();
+            Assert.Equal("This event has ended. The scanner is no longer available.", error!.Message);
+        }
+        finally
+        {
+            _factory.Clock.Now = CheckInFactory.DefaultNow;
+        }
+    }
+
+    [Fact]
+    public async Task EventDay_UsesVenueLocalDate_NotUtcDate()
+    {
+        await _factory.SeedAssignmentsIfNeededAsync();
+        var client = _factory.CreateUserClient(id: "50", role: "Coordinator");
+        // 2026-11-14 19:00 UTC is already 2026-11-15 00:30 in Sri Lanka (+05:30)
+        _factory.Clock.Now = new DateTimeOffset(2026, 11, 14, 19, 0, 0, TimeSpan.Zero);
+        try
+        {
+            var access = await client.GetAsync("/api/checkin/coordinator/events/1/access");
+            Assert.Equal(HttpStatusCode.OK, access.StatusCode);
+        }
+        finally
+        {
+            _factory.Clock.Now = CheckInFactory.DefaultNow;
+        }
     }
 }
