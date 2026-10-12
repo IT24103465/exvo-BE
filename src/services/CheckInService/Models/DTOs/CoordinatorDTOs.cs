@@ -7,8 +7,18 @@ public record AssignedEventDto(
     DateTime EventDate,
     string? Venue,
     string? Location,
-    bool IsHidden
+    bool IsHidden,
+    string ScannerCategory = ScannerEventCategory.Upcoming, // TODAY | UPCOMING | PAST
+    bool CanLaunchScanner = false
 );
+
+/// <summary>Scanner portal categories based on the event's local calendar day.</summary>
+public static class ScannerEventCategory
+{
+    public const string Today = "TODAY";
+    public const string Upcoming = "UPCOMING";
+    public const string Past = "PAST";
+}
 
 /// <summary>Scanner access check result for a specific event.</summary>
 public record ScannerAccessDto(
