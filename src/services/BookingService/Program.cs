@@ -504,7 +504,100 @@ app.MapGet("/api/booking/organizer/events/{eventId:int}/seating-plan", async (in
     return plan is null ? Results.NotFound() : Results.Ok(ToResponse(plan));
 }).RequireAuthorization("Organizer");
 
+// Internal endpoint called by CheckInService to validate a ticket code during coordinator check-in.
+// Not exposed via API Gateway — service-to-service only.
+app.MapGet("/api/booking/internal/tickets/{ticketCode}", async (string ticketCode, int? eventId, BookingDbContext db, CancellationToken ct) =>
+{
+    // TicketCode format: {BookingReference}-{BookingItemId}
+    // Parse itemId from last segment
+    var lastDash = ticketCode.LastIndexOf('-');
+    if (lastDash < 0 || !int.TryParse(ticketCode[(lastDash + 1)..], out var itemId))
+        return Results.NotFound(new { status = "INVALID", message = "Ticket code format is invalid." });
+
+    var bookingRef = ticketCode[..lastDash];
+
+    var item = await db.BookingItems
+        .AsNoTracking()
+        .Include(i => i.Booking)
+        .Include(i => i.Seat)
+        .FirstOrDefaultAsync(i =>
+            i.Id == itemId &&
+            i.Booking.BookingReference == bookingRef &&
+            i.Booking.Status == BookingStatus.Confirmed, ct);
+
+    if (item is null)
+        return Results.NotFound(new { status = "INVALID" });
+
+    // Optional event filter
+    if (eventId.HasValue && item.Booking.EventId != eventId.Value)
+        return Results.NotFound(new { status = "INVALID", message = "Ticket belongs to a different event." });
+
+    return Results.Ok(new
+    {
+        ticketCode,
+        ticketId = item.Id,
+        eventId = item.Booking.EventId,
+        bookingId = item.BookingId,
+        attendeeId = item.Booking.AttendeeUserId,
+        attendeeName = item.Booking.AttendeeEmail ?? $"User #{item.Booking.AttendeeUserId}",
+        ticketType = item.SeatCode ?? "General Admission",
+        seatCode = item.Seat != null ? item.Seat.SeatCode : (item.SeatCode ?? "GA"),
+        status = item.Booking.Status.ToString()
+    });
+});
+
+// Internal endpoint called by CheckInService / Analytics to retrieve confirmed and cancelled booking metrics
+app.MapGet("/api/booking/internal/events/{eventId:int}/metrics", async (int eventId, BookingDbContext db, CancellationToken ct) =>
+{
+    var confirmedBookings = await db.Bookings
+        .AsNoTracking()
+        .Include(b => b.Items)
+        .Where(b => b.EventId == eventId && b.Status == BookingStatus.Confirmed)
+        .ToListAsync(ct);
+
+    var cancelledBookings = await db.Bookings
+        .AsNoTracking()
+        .Include(b => b.Items)
+        .Where(b => b.EventId == eventId && b.Status == BookingStatus.Cancelled)
+        .ToListAsync(ct);
+
+    var totalTicketsSold = confirmedBookings.Sum(b => b.Items.Count);
+    var totalRevenue = confirmedBookings.Sum(b => b.TotalAmount);
+    var currency = confirmedBookings.FirstOrDefault()?.Currency ?? "LKR";
+
+    var cancelledBookingsCount = cancelledBookings.Count;
+    var cancelledTicketsCount = cancelledBookings.Sum(b => b.Items.Count);
+    var cancelledAmount = cancelledBookings.Sum(b => b.TotalAmount);
+
+    var confirmedItems = confirmedBookings.SelectMany(b => b.Items).ToList();
+    var tierMetrics = confirmedItems
+        .GroupBy(i => new { i.TicketTierId, TierName = i.SeatCode ?? "General Admission", i.UnitPrice })
+        .Select(g => new
+        {
+            ticketTierId = g.Key.TicketTierId,
+            tierName = g.Key.TierName,
+            unitPrice = g.Key.UnitPrice,
+            soldQuantity = g.Count(),
+            revenue = g.Sum(item => item.UnitPrice)
+        })
+        .ToList();
+
+    return Results.Ok(new
+    {
+        eventId,
+        totalTicketsSold,
+        totalRevenue,
+        currency,
+        confirmedBookingsCount = confirmedBookings.Count,
+        cancelledBookingsCount,
+        cancelledTicketsCount,
+        cancelledAmount,
+        tierMetrics
+    });
+});
+
 app.Run();
+
 
 static async Task<IResult> SavePlan(int eventId, SeatingPlanRequest request, ClaimsPrincipal user, BookingDbContext db, IEventOwnershipClient ownership, IEventInventoryCatalogClient catalog, CancellationToken ct)
 {

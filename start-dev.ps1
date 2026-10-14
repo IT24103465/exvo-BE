@@ -36,6 +36,7 @@ if ([string]::IsNullOrWhiteSpace($password) -or $password -eq 'YOUR_AZURE_MYSQL_
 $projects = @(
     @{ Name = 'AuthService'; Path = 'src/services/AuthService/ExvoAuthService.csproj' },
     @{ Name = 'CatalogService'; Path = 'src/services/CatalogService/Exvo.CatalogService.csproj' },
+    @{ Name = 'CheckInService'; Path = 'src/services/CheckInService/Exvo.CheckInService.csproj' },
     @{ Name = 'API Gateway'; Path = 'src/gateway/ApiGateway/ApiGateway.csproj' }
 )
 foreach ($project in $projects) {
@@ -52,8 +53,8 @@ if (-not (Test-Path -LiteralPath $shell)) { $shell = Join-Path $PSHOME 'powershe
 if (-not (Test-Path -LiteralPath $shell)) { throw 'This launcher requires PowerShell on Windows.' }
 
 Add-Type -AssemblyName System.Data
-$variableNames = @('EXVO_AUTH_MYSQL_CONNECTION_STRING', 'EXVO_CATALOG_MYSQL_CONNECTION_STRING')
-$databases = @('exvo_auth_db', 'exvo_catalog_db')
+$variableNames = @('EXVO_AUTH_MYSQL_CONNECTION_STRING', 'EXVO_CATALOG_MYSQL_CONNECTION_STRING', 'EXVO_CHECKIN_MYSQL_CONNECTION_STRING')
+$databases = @('exvo_auth_db', 'exvo_catalog_db', 'exvo_checkin_db')
 $previous = @{}
 foreach ($name in $variableNames) { $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 try {

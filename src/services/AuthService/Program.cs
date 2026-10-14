@@ -1,4 +1,4 @@
-﻿using System.IdentityModel.Tokens.Jwt;
+using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -144,10 +144,13 @@ app.MapPost("/api/auth/register", async (RegisterRequest request, AppDbContext d
         return Results.BadRequest(new { Message = "Email and password are required." });
     }
 
-    var isOrganizer = string.Equals(request.Role, "Organizer", StringComparison.OrdinalIgnoreCase) ||
+    var isCoordinator = string.Equals(request.Role, "Coordinator", StringComparison.OrdinalIgnoreCase);
+
+    var isOrganizer = !isCoordinator && (
+                      string.Equals(request.Role, "Organizer", StringComparison.OrdinalIgnoreCase) ||
                       string.Equals(request.Role, "Company", StringComparison.OrdinalIgnoreCase) ||
                       string.Equals(request.Role, "Business", StringComparison.OrdinalIgnoreCase) ||
-                      !string.IsNullOrWhiteSpace(request.CompanyRegNumber);
+                      !string.IsNullOrWhiteSpace(request.CompanyRegNumber));
 
     var companyName = !string.IsNullOrWhiteSpace(request.CompanyName)
         ? request.CompanyName
@@ -165,7 +168,7 @@ app.MapPost("/api/auth/register", async (RegisterRequest request, AppDbContext d
     }
 
     var passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
-    var resolvedRole = isOrganizer ? "Organizer" : "Attendee";
+    var resolvedRole = isCoordinator ? "Coordinator" : (isOrganizer ? "Organizer" : "Attendee");
     var resolvedName = isOrganizer ? companyName! : request.FullName;
 
     var user = new User
