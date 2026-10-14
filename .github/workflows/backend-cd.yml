@@ -8,6 +8,7 @@ on:
       - 'src/services/CatalogService/**'
       - 'src/services/BookingService/**'
       - 'src/services/TicketService/**'
+      - 'src/services/CheckInService/**'
       - 'src/gateway/ApiGateway/**'
       - 'src/shared/**'
       - 'ExvoPlatform.sln'
@@ -29,6 +30,7 @@ on:
           - catalog
           - booking
           - ticket
+          - checkin
           - gateway
 
 permissions:
@@ -97,6 +99,15 @@ jobs:
               - 'global.json'
               - 'NuGet.config'
               - '.github/workflows/backend-cd.yml'
+            checkin:
+              - 'src/services/CheckInService/**'
+              - 'src/shared/**'
+              - 'ExvoPlatform.sln'
+              - '*.props'
+              - '*.targets'
+              - 'global.json'
+              - 'NuGet.config'
+              - '.github/workflows/backend-cd.yml'
             gateway:
               - 'src/gateway/ApiGateway/**'
               - 'src/shared/**'
@@ -117,6 +128,7 @@ jobs:
           CATALOG_CHANGED: ${{ steps.filter.outputs.catalog }}
           BOOKING_CHANGED: ${{ steps.filter.outputs.booking }}
           TICKET_CHANGED: ${{ steps.filter.outputs.ticket }}
+          CHECKIN_CHANGED: ${{ steps.filter.outputs.checkin }}
           GATEWAY_CHANGED: ${{ steps.filter.outputs.gateway }}
         run: |
           set -euo pipefail
@@ -146,6 +158,7 @@ jobs:
           selected catalog "$CATALOG_CHANGED" && add_service catalog CatalogService src/services/CatalogService/Dockerfile exvo-catalog
           selected booking "$BOOKING_CHANGED" && add_service booking BookingService src/services/BookingService/Dockerfile exvo-bookingservice
           selected ticket "$TICKET_CHANGED" && add_service ticket TicketService src/services/TicketService/Dockerfile exvo-ticketservice
+          selected checkin "$CHECKIN_CHANGED" && add_service checkin CheckInService src/services/CheckInService/Dockerfile exvo-checkinservice
           selected gateway "$GATEWAY_CHANGED" && add_service gateway 'API Gateway' src/gateway/ApiGateway/Dockerfile exvo-gateway
 
           if [ "$(jq length <<< "$matrix")" -eq 0 ]; then
@@ -165,6 +178,7 @@ jobs:
       CATALOG_CONTAINER_APP: ${{ vars.AZURE_PRODUCTION_CATALOG_CONTAINER_APP }}
       BOOKING_CONTAINER_APP: ${{ vars.AZURE_PRODUCTION_BOOKING_CONTAINER_APP }}
       TICKET_CONTAINER_APP: ${{ vars.AZURE_PRODUCTION_TICKET_CONTAINER_APP }}
+      CHECKIN_CONTAINER_APP: ${{ vars.AZURE_PRODUCTION_CHECKIN_CONTAINER_APP }}
       GATEWAY_CONTAINER_APP: ${{ vars.AZURE_PRODUCTION_GATEWAY_CONTAINER_APP }}
       ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
       ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
@@ -202,6 +216,7 @@ jobs:
               catalog) require_value AZURE_PRODUCTION_CATALOG_CONTAINER_APP "$CATALOG_CONTAINER_APP" ;;
               booking) require_value AZURE_PRODUCTION_BOOKING_CONTAINER_APP "$BOOKING_CONTAINER_APP" ;;
               ticket) require_value AZURE_PRODUCTION_TICKET_CONTAINER_APP "$TICKET_CONTAINER_APP" ;;
+              checkin) require_value AZURE_PRODUCTION_CHECKIN_CONTAINER_APP "$CHECKIN_CONTAINER_APP" ;;
               gateway) require_value AZURE_PRODUCTION_GATEWAY_CONTAINER_APP "$GATEWAY_CONTAINER_APP" ;;
               *) echo "::error::Unknown deployment service: $service"; missing=1 ;;
             esac
@@ -230,6 +245,7 @@ jobs:
       CATALOG_CONTAINER_APP: ${{ vars.AZURE_PRODUCTION_CATALOG_CONTAINER_APP }}
       BOOKING_CONTAINER_APP: ${{ vars.AZURE_PRODUCTION_BOOKING_CONTAINER_APP }}
       TICKET_CONTAINER_APP: ${{ vars.AZURE_PRODUCTION_TICKET_CONTAINER_APP }}
+      CHECKIN_CONTAINER_APP: ${{ vars.AZURE_PRODUCTION_CHECKIN_CONTAINER_APP }}
       GATEWAY_CONTAINER_APP: ${{ vars.AZURE_PRODUCTION_GATEWAY_CONTAINER_APP }}
       AZURE_CORE_OUTPUT: none
     steps:
@@ -245,6 +261,7 @@ jobs:
             catalog) app="$CATALOG_CONTAINER_APP" ;;
             booking) app="$BOOKING_CONTAINER_APP" ;;
             ticket) app="$TICKET_CONTAINER_APP" ;;
+            checkin) app="$CHECKIN_CONTAINER_APP" ;;
             gateway) app="$GATEWAY_CONTAINER_APP" ;;
             *) echo 'Unknown deployment service.' >&2; exit 1 ;;
           esac
