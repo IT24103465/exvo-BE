@@ -36,7 +36,10 @@ builder.Services.AddHttpClient("CatalogService", client =>
 builder.Services.AddHttpClient("BookingService", client =>
     client.BaseAddress = new Uri(builder.Configuration["BookingService:BaseUrl"] ?? "http://localhost:5063"));
 
-// 3. Register Outbox Service & Background Workers
+// 3. Register Outbox Service, Analytics, Reports & Background Workers
+builder.Services.AddSingleton<IRealtimeAnalyticsNotifier, RealtimeAnalyticsNotifier>();
+builder.Services.AddScoped<IEventAnalyticsService, EventAnalyticsService>();
+builder.Services.AddScoped<IEventReportService, EventReportService>();
 builder.Services.AddScoped<ICheckInOutboxService, CheckInOutboxService>();
 builder.Services.AddSingleton<CheckInConcurrencyGate>();
 builder.Services.AddSingleton(TimeProvider.System);
@@ -483,6 +486,7 @@ app.MapPost("/api/checkin/scan", async (
     CheckInDbContext db,
     ICheckInOutboxService outboxService,
     IHttpClientFactory httpClientFactory,
+    IRealtimeAnalyticsNotifier realtimeNotifier,
     CheckInConcurrencyGate concurrencyGate) =>
 {
     if (string.IsNullOrWhiteSpace(request.QrCode) || request.EventId <= 0)
@@ -647,6 +651,7 @@ app.MapPost("/api/checkin/scan", async (
         try
         {
             await db.SaveChangesAsync();
+            realtimeNotifier.NotifyEventUpdated(request.EventId);
         }
         catch (DbUpdateException)
         {
@@ -778,77 +783,20 @@ app.MapGet("/api/checkin/event/{eventId:int}/stats", async (
 app.MapGet("/api/checkin/analytics/event/{eventId:int}/summary", async (
     int eventId,
     ClaimsPrincipal user,
-    CheckInDbContext db,
-    IHttpClientFactory httpClientFactory) =>
+    IEventAnalyticsService analyticsService,
+    IHttpClientFactory httpClientFactory,
+    CancellationToken ct) =>
 {
     if (eventId <= 0) return Results.BadRequest(new ErrorDto("Valid EventId is required."));
 
     if (!await ValidateEventOwnershipAsync(eventId, user, httpClientFactory))
         return Results.Json(new ErrorDto("Access denied. You do not own this event."), statusCode: 403);
 
-    var catalogClient = httpClientFactory.CreateClient("CatalogService");
-    CatalogEventResponse? eventData = null;
-    try
-    {
-        var catResponse = await catalogClient.GetAsync($"/api/catalog/events/{eventId}/ticket-snapshot");
-        if (catResponse.IsSuccessStatusCode)
-        {
-            eventData = await catResponse.Content.ReadFromJsonAsync<CatalogEventResponse>();
-        }
-    }
-    catch { }
-
-    if (eventData is null)
+    var summary = await analyticsService.GetEventAnalyticsSummaryAsync(eventId, ct);
+    if (summary is null)
         return Results.NotFound(new ErrorDto("Event not found."));
 
-    var bookingClient = httpClientFactory.CreateClient("BookingService");
-    EventBookingMetricsResponse? bookingMetrics = null;
-    try
-    {
-        var bookResponse = await bookingClient.GetAsync($"/api/booking/internal/events/{eventId}/metrics");
-        if (bookResponse.IsSuccessStatusCode)
-        {
-            bookingMetrics = await bookResponse.Content.ReadFromJsonAsync<EventBookingMetricsResponse>();
-        }
-    }
-    catch { }
-
-    var totalTicketsSold = bookingMetrics?.TotalTicketsSold ?? 0;
-    var totalRevenue = bookingMetrics?.TotalRevenue ?? 0m;
-    var currency = bookingMetrics?.Currency ?? "LKR";
-    var totalRefundedTickets = bookingMetrics?.CancelledTicketsCount ?? 0;
-    var totalRefundedAmount = bookingMetrics?.CancelledAmount ?? 0m;
-
-    // Total capacity = available tickets from catalog + sold tickets (or tier sum if defined)
-    var catalogCapacity = eventData.AvailableTickets;
-    var totalCapacity = Math.Max(catalogCapacity, totalTicketsSold + (catalogCapacity > totalTicketsSold ? catalogCapacity - totalTicketsSold : 0));
-    if (totalCapacity < totalTicketsSold) totalCapacity = totalTicketsSold;
-    var remainingTickets = Math.Max(0, totalCapacity - totalTicketsSold);
-
-    var totalCheckedIn = await db.ScannedTickets
-        .AsNoTracking()
-        .CountAsync(t => t.EventId == eventId && t.Status == ScannedTicketStatus.CheckedIn);
-
-    var totalAttendeesExpected = totalTicketsSold;
-    var attendancePercentage = totalAttendeesExpected > 0
-        ? Math.Round((double)totalCheckedIn / totalAttendeesExpected * 100.0, 2)
-        : 0.0;
-
-    return Results.Ok(new EventAnalyticsSummaryResponse(
-        EventId: eventId,
-        Title: eventData.Title ?? $"Event #{eventId}",
-        TotalCapacity: totalCapacity,
-        TotalTicketsSold: totalTicketsSold,
-        RemainingTickets: remainingTickets,
-        TotalRevenue: totalRevenue,
-        Currency: currency,
-        TotalCheckedIn: totalCheckedIn,
-        TotalAttendeesExpected: totalAttendeesExpected,
-        AttendancePercentage: attendancePercentage,
-        TotalRefundedTickets: totalRefundedTickets,
-        TotalRefundedAmount: totalRefundedAmount,
-        LastUpdatedUtc: DateTime.UtcNow
-    ));
+    return Results.Ok(summary);
 })
 .RequireAuthorization("CheckInScannerAccess")
 .WithName("GetEventAnalyticsSummary")
@@ -860,96 +808,20 @@ app.MapGet("/api/checkin/analytics/event/{eventId:int}/summary", async (
 app.MapGet("/api/checkin/analytics/event/{eventId:int}/sales", async (
     int eventId,
     ClaimsPrincipal user,
-    CheckInDbContext db,
-    IHttpClientFactory httpClientFactory) =>
+    IEventAnalyticsService analyticsService,
+    IHttpClientFactory httpClientFactory,
+    CancellationToken ct) =>
 {
     if (eventId <= 0) return Results.BadRequest(new ErrorDto("Valid EventId is required."));
 
     if (!await ValidateEventOwnershipAsync(eventId, user, httpClientFactory))
         return Results.Json(new ErrorDto("Access denied. You do not own this event."), statusCode: 403);
 
-    var catalogClient = httpClientFactory.CreateClient("CatalogService");
-    CatalogEventResponse? eventData = null;
-    try
-    {
-        var catResponse = await catalogClient.GetAsync($"/api/catalog/events/{eventId}/ticket-snapshot");
-        if (catResponse.IsSuccessStatusCode)
-        {
-            eventData = await catResponse.Content.ReadFromJsonAsync<CatalogEventResponse>();
-        }
-    }
-    catch { }
-
-    if (eventData is null)
+    var sales = await analyticsService.GetEventSalesAnalyticsAsync(eventId, ct);
+    if (sales is null)
         return Results.NotFound(new ErrorDto("Event not found."));
 
-    var bookingClient = httpClientFactory.CreateClient("BookingService");
-    EventBookingMetricsResponse? bookingMetrics = null;
-    try
-    {
-        var bookResponse = await bookingClient.GetAsync($"/api/booking/internal/events/{eventId}/metrics");
-        if (bookResponse.IsSuccessStatusCode)
-        {
-            bookingMetrics = await bookResponse.Content.ReadFromJsonAsync<EventBookingMetricsResponse>();
-        }
-    }
-    catch { }
-
-    var totalTicketsSold = bookingMetrics?.TotalTicketsSold ?? 0;
-    var totalRevenue = bookingMetrics?.TotalRevenue ?? 0m;
-    var currency = bookingMetrics?.Currency ?? "LKR";
-    var confirmedBookingsCount = bookingMetrics?.ConfirmedBookingsCount ?? 0;
-    var cancelledBookingsCount = bookingMetrics?.CancelledBookingsCount ?? 0;
-    var refundedTicketsCount = bookingMetrics?.CancelledTicketsCount ?? 0;
-    var refundedAmount = bookingMetrics?.CancelledAmount ?? 0m;
-
-    var catalogCapacity = eventData.AvailableTickets;
-    var totalCapacity = Math.Max(catalogCapacity, totalTicketsSold);
-    var remainingTickets = Math.Max(0, totalCapacity - totalTicketsSold);
-
-    var tierSalesList = new List<TierSalesMetricsDto>();
-    if (bookingMetrics?.TierMetrics != null && bookingMetrics.TierMetrics.Count > 0)
-    {
-        foreach (var tm in bookingMetrics.TierMetrics)
-        {
-            tierSalesList.Add(new TierSalesMetricsDto(
-                TicketTierId: tm.TicketTierId,
-                TierName: tm.TierName,
-                UnitPrice: tm.UnitPrice,
-                SoldQuantity: tm.SoldQuantity,
-                TotalCapacity: tm.SoldQuantity, // Tier capacity fallback
-                RemainingQuantity: 0,
-                Revenue: tm.Revenue
-            ));
-        }
-    }
-    else if (totalTicketsSold > 0)
-    {
-        tierSalesList.Add(new TierSalesMetricsDto(
-            TicketTierId: null,
-            TierName: "General Admission",
-            UnitPrice: eventData.Price,
-            SoldQuantity: totalTicketsSold,
-            TotalCapacity: totalCapacity,
-            RemainingQuantity: remainingTickets,
-            Revenue: totalRevenue
-        ));
-    }
-
-    return Results.Ok(new EventSalesAnalyticsResponse(
-        EventId: eventId,
-        TotalTicketsSold: totalTicketsSold,
-        TotalCapacity: totalCapacity,
-        RemainingTickets: remainingTickets,
-        TotalRevenue: totalRevenue,
-        Currency: currency,
-        ConfirmedBookingsCount: confirmedBookingsCount,
-        CancelledBookingsCount: cancelledBookingsCount,
-        RefundedTicketsCount: refundedTicketsCount,
-        RefundedAmount: refundedAmount,
-        TierSales: tierSalesList,
-        LastUpdatedUtc: DateTime.UtcNow
-    ));
+    return Results.Ok(sales);
 })
 .RequireAuthorization("CheckInScannerAccess")
 .WithName("GetEventSalesAnalytics")
@@ -961,102 +833,290 @@ app.MapGet("/api/checkin/analytics/event/{eventId:int}/sales", async (
 app.MapGet("/api/checkin/analytics/event/{eventId:int}/attendance", async (
     int eventId,
     ClaimsPrincipal user,
-    CheckInDbContext db,
-    IHttpClientFactory httpClientFactory) =>
+    IEventAnalyticsService analyticsService,
+    IHttpClientFactory httpClientFactory,
+    CancellationToken ct) =>
 {
     if (eventId <= 0) return Results.BadRequest(new ErrorDto("Valid EventId is required."));
 
     if (!await ValidateEventOwnershipAsync(eventId, user, httpClientFactory))
         return Results.Json(new ErrorDto("Access denied. You do not own this event."), statusCode: 403);
 
-    var bookingClient = httpClientFactory.CreateClient("BookingService");
-    EventBookingMetricsResponse? bookingMetrics = null;
-    try
-    {
-        var bookResponse = await bookingClient.GetAsync($"/api/booking/internal/events/{eventId}/metrics");
-        if (bookResponse.IsSuccessStatusCode)
-        {
-            bookingMetrics = await bookResponse.Content.ReadFromJsonAsync<EventBookingMetricsResponse>();
-        }
-    }
-    catch { }
+    var attendance = await analyticsService.GetEventAttendanceAnalyticsAsync(eventId, ct);
+    if (attendance is null)
+        return Results.NotFound(new ErrorDto("Event not found."));
 
-    var totalTicketsSold = bookingMetrics?.TotalTicketsSold ?? 0;
-
-    var scannedTickets = await db.ScannedTickets
-        .AsNoTracking()
-        .Where(t => t.EventId == eventId)
-        .ToListAsync();
-
-    var totalCheckedIn = scannedTickets.Count(t => t.Status == ScannedTicketStatus.CheckedIn);
-    var totalRejectedScans = scannedTickets.Count(t => t.Status == ScannedTicketStatus.Rejected);
-    var totalNotCheckedIn = Math.Max(0, totalTicketsSold - totalCheckedIn);
-
-    var attendancePercentage = totalTicketsSold > 0
-        ? Math.Round((double)totalCheckedIn / totalTicketsSold * 100.0, 2)
-        : 0.0;
-
-    // Group check-ins by hour
-    var hourlyCheckIns = scannedTickets
-        .Where(t => t.Status == ScannedTicketStatus.CheckedIn)
-        .GroupBy(t => new DateTime(t.ScannedAt.Year, t.ScannedAt.Month, t.ScannedAt.Day, t.ScannedAt.Hour, 0, 0, DateTimeKind.Utc))
-        .OrderBy(g => g.Key)
-        .Select(g => new HourlyCheckInDto(
-            HourUtc: g.Key,
-            CheckInCount: g.Count()
-        ))
-        .ToList();
-
-    // Group check-ins by tier / ticket type
-    var tierAttendanceList = new List<TierAttendanceDto>();
-    var checkedInByTier = scannedTickets
-        .Where(t => t.Status == ScannedTicketStatus.CheckedIn)
-        .GroupBy(t => string.IsNullOrWhiteSpace(t.TicketType) ? "General Admission" : t.TicketType)
-        .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
-
-    if (bookingMetrics?.TierMetrics != null && bookingMetrics.TierMetrics.Count > 0)
-    {
-        foreach (var tm in bookingMetrics.TierMetrics)
-        {
-            var tierName = tm.TierName;
-            var checkedInCount = checkedInByTier.TryGetValue(tierName, out var count) ? count : 0;
-            var tierAttendancePct = tm.SoldQuantity > 0
-                ? Math.Round((double)checkedInCount / tm.SoldQuantity * 100.0, 2)
-                : 0.0;
-
-            tierAttendanceList.Add(new TierAttendanceDto(
-                TicketType: tierName,
-                TotalSold: tm.SoldQuantity,
-                CheckedInCount: checkedInCount,
-                AttendancePercentage: tierAttendancePct
-            ));
-        }
-    }
-    else
-    {
-        tierAttendanceList.Add(new TierAttendanceDto(
-            TicketType: "General Admission",
-            TotalSold: totalTicketsSold,
-            CheckedInCount: totalCheckedIn,
-            AttendancePercentage: attendancePercentage
-        ));
-    }
-
-    return Results.Ok(new EventAttendanceAnalyticsResponse(
-        EventId: eventId,
-        TotalTicketsSold: totalTicketsSold,
-        TotalCheckedIn: totalCheckedIn,
-        TotalNotCheckedIn: totalNotCheckedIn,
-        TotalRejectedScans: totalRejectedScans,
-        AttendancePercentage: attendancePercentage,
-        HourlyCheckIns: hourlyCheckIns,
-        TierAttendance: tierAttendanceList,
-        LastUpdatedUtc: DateTime.UtcNow
-    ));
+    return Results.Ok(attendance);
 })
 .RequireAuthorization("CheckInScannerAccess")
 .WithName("GetEventAttendanceAnalytics")
 .WithOpenApi();
+
+// =============================================================================
+// 8. SCRUM-36: Real-Time Event Check-In Analytics REST API
+// =============================================================================
+static async Task<IResult> HandleRealtimeAnalytics(
+    int eventId,
+    HttpContext httpContext,
+    ClaimsPrincipal user,
+    IEventAnalyticsService analyticsService,
+    IHttpClientFactory httpClientFactory,
+    CancellationToken ct)
+{
+    if (eventId <= 0) return Results.BadRequest(new ErrorDto("Valid EventId is required."));
+
+    if (!await ValidateEventOwnershipAsync(eventId, user, httpClientFactory))
+        return Results.Json(new ErrorDto("Access denied. You do not own this event."), statusCode: 403);
+
+    var realtime = await analyticsService.GetEventRealtimeAnalyticsAsync(eventId, ct);
+    if (realtime is null)
+        return Results.NotFound(new ErrorDto("Event not found."));
+
+    // Efficient polling with stable ETag based on check-in state
+    var etag = $"\"{eventId}-{realtime.VenueCapacity}-{realtime.TotalSoldTickets}-{realtime.TotalUniqueCheckedInTickets}-{realtime.TotalRejectedScans}\"";
+    if (httpContext.Request.Headers.IfNoneMatch == etag)
+    {
+        return Results.StatusCode(StatusCodes.Status304NotModified);
+    }
+
+    httpContext.Response.Headers.ETag = etag;
+    httpContext.Response.Headers.CacheControl = "private, max-age=2";
+
+    return Results.Ok(realtime);
+}
+
+app.MapGet("/api/checkin/analytics/event/{eventId:int}/realtime", HandleRealtimeAnalytics)
+    .RequireAuthorization("CheckInScannerAccess")
+    .WithName("GetEventRealtimeAnalytics")
+    .WithOpenApi();
+
+app.MapGet("/api/checkin/event/{eventId:int}/realtime-analytics", HandleRealtimeAnalytics)
+    .RequireAuthorization("CheckInScannerAccess")
+    .WithName("GetEventRealtimeAnalyticsAlias")
+    .WithOpenApi();
+
+app.MapGet("/api/checkin/analytics/event/{eventId:int}", HandleRealtimeAnalytics)
+    .RequireAuthorization("CheckInScannerAccess")
+    .WithName("GetEventAnalyticsDefault")
+    .WithOpenApi();
+
+// =============================================================================
+// 9. SCRUM-36: Server-Sent Events (SSE) Live Stream Endpoint
+// =============================================================================
+app.MapGet("/api/checkin/analytics/event/{eventId:int}/live", async (
+    int eventId,
+    HttpContext httpContext,
+    ClaimsPrincipal user,
+    IEventAnalyticsService analyticsService,
+    IRealtimeAnalyticsNotifier notifier,
+    IHttpClientFactory httpClientFactory,
+    CancellationToken ct) =>
+{
+    if (eventId <= 0) return Results.BadRequest(new ErrorDto("Valid EventId is required."));
+
+    if (!await ValidateEventOwnershipAsync(eventId, user, httpClientFactory))
+        return Results.Json(new ErrorDto("Access denied. You do not own this event."), statusCode: 403);
+
+    var initial = await analyticsService.GetEventRealtimeAnalyticsAsync(eventId, ct);
+    if (initial is null)
+        return Results.NotFound(new ErrorDto("Event not found."));
+
+    httpContext.Response.Headers.Append("Content-Type", "text/event-stream");
+    httpContext.Response.Headers.Append("Cache-Control", "no-cache, no-transform");
+    httpContext.Response.Headers.Append("Connection", "keep-alive");
+
+    var responseStream = httpContext.Response.Body;
+    var clientToken = httpContext.RequestAborted;
+    var jsonOptions = new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase };
+
+    // Initial snapshot
+    var initialJson = System.Text.Json.JsonSerializer.Serialize(initial, jsonOptions);
+    await responseStream.WriteAsync(Encoding.UTF8.GetBytes($"data: {initialJson}\n\n"), clientToken);
+    await responseStream.FlushAsync(clientToken);
+
+    using var subscriber = notifier.Subscribe(eventId);
+    try
+    {
+        while (!clientToken.IsCancellationRequested)
+        {
+            var hasUpdate = await subscriber.WaitAsync(TimeSpan.FromSeconds(5), clientToken);
+            if (clientToken.IsCancellationRequested) break;
+
+            if (hasUpdate)
+            {
+                var updated = await analyticsService.GetEventRealtimeAnalyticsAsync(eventId, clientToken);
+                if (updated != null)
+                {
+                    var json = System.Text.Json.JsonSerializer.Serialize(updated, jsonOptions);
+                    await responseStream.WriteAsync(Encoding.UTF8.GetBytes($"data: {json}\n\n"), clientToken);
+                    await responseStream.FlushAsync(clientToken);
+                }
+            }
+            else
+            {
+                // Heartbeat keepalive comment
+                await responseStream.WriteAsync(Encoding.UTF8.GetBytes(": keepalive\n\n"), clientToken);
+                await responseStream.FlushAsync(clientToken);
+            }
+        }
+    }
+    finally
+    {
+        notifier.Unsubscribe(eventId, subscriber);
+    }
+
+    return Results.Empty;
+})
+.RequireAuthorization("CheckInScannerAccess")
+.WithName("LiveStreamEventAnalytics")
+.WithOpenApi();
+
+// =============================================================================
+// 10. SCRUM-37: Dynamic Sales & Attendance Reports APIs (JSON, CSV, PDF)
+// =============================================================================
+static async Task<IResult> HandleSalesReport(
+    int eventId,
+    string? format,
+    HttpContext httpContext,
+    ClaimsPrincipal user,
+    IEventReportService reportService,
+    IHttpClientFactory httpClientFactory,
+    CancellationToken ct)
+{
+    if (eventId <= 0) return Results.BadRequest(new ErrorDto("Valid EventId is required."));
+
+    if (!await ValidateEventOwnershipAsync(eventId, user, httpClientFactory))
+        return Results.Json(new ErrorDto("Access denied. You do not own this event."), statusCode: 403);
+
+    var report = await reportService.GenerateSalesReportAsync(eventId, ct);
+    if (report is null)
+        return Results.NotFound(new ErrorDto("Event not found."));
+
+    var accept = httpContext.Request.Headers.Accept.ToString();
+    var fmt = (format ?? string.Empty).Trim().ToLowerInvariant();
+
+    if (fmt == "csv" || accept.Contains("text/csv"))
+    {
+        var csvBytes = CsvReportGenerator.GenerateSalesReportCsv(report);
+        return Results.File(csvBytes, "text/csv; charset=utf-8", $"sales-report-event-{eventId}.csv");
+    }
+
+    if (fmt == "pdf" || accept.Contains("application/pdf"))
+    {
+        var pdfBytes = PdfReportGenerator.GenerateSalesReportPdf(report);
+        return Results.File(pdfBytes, "application/pdf", $"sales-report-event-{eventId}.pdf");
+    }
+
+    return Results.Ok(report);
+}
+
+static async Task<IResult> HandleAttendanceReport(
+    int eventId,
+    string? format,
+    HttpContext httpContext,
+    ClaimsPrincipal user,
+    IEventReportService reportService,
+    IHttpClientFactory httpClientFactory,
+    CancellationToken ct)
+{
+    if (eventId <= 0) return Results.BadRequest(new ErrorDto("Valid EventId is required."));
+
+    if (!await ValidateEventOwnershipAsync(eventId, user, httpClientFactory))
+        return Results.Json(new ErrorDto("Access denied. You do not own this event."), statusCode: 403);
+
+    var report = await reportService.GenerateAttendanceReportAsync(eventId, ct);
+    if (report is null)
+        return Results.NotFound(new ErrorDto("Event not found."));
+
+    var accept = httpContext.Request.Headers.Accept.ToString();
+    var fmt = (format ?? string.Empty).Trim().ToLowerInvariant();
+
+    if (fmt == "csv" || accept.Contains("text/csv"))
+    {
+        var csvBytes = CsvReportGenerator.GenerateAttendanceReportCsv(report);
+        return Results.File(csvBytes, "text/csv; charset=utf-8", $"attendance-report-event-{eventId}.csv");
+    }
+
+    if (fmt == "pdf" || accept.Contains("application/pdf"))
+    {
+        var pdfBytes = PdfReportGenerator.GenerateAttendanceReportPdf(report);
+        return Results.File(pdfBytes, "application/pdf", $"attendance-report-event-{eventId}.pdf");
+    }
+
+    return Results.Ok(report);
+}
+
+// Sales Report Endpoints
+app.MapGet("/api/checkin/reports/event/{eventId:int}/sales", (int eventId, string? format, HttpContext ctx, ClaimsPrincipal u, IEventReportService rs, IHttpClientFactory hcf, CancellationToken ct) =>
+    HandleSalesReport(eventId, format, ctx, u, rs, hcf, ct))
+    .RequireAuthorization("CheckInScannerAccess")
+    .WithName("GetEventSalesReport")
+    .WithOpenApi();
+
+app.MapGet("/api/checkin/reports/event/{eventId:int}/sales/csv", (int eventId, HttpContext ctx, ClaimsPrincipal u, IEventReportService rs, IHttpClientFactory hcf, CancellationToken ct) =>
+    HandleSalesReport(eventId, "csv", ctx, u, rs, hcf, ct))
+    .RequireAuthorization("CheckInScannerAccess")
+    .WithName("GetEventSalesReportCsv")
+    .WithOpenApi();
+
+app.MapGet("/api/checkin/reports/event/{eventId:int}/sales/pdf", (int eventId, HttpContext ctx, ClaimsPrincipal u, IEventReportService rs, IHttpClientFactory hcf, CancellationToken ct) =>
+    HandleSalesReport(eventId, "pdf", ctx, u, rs, hcf, ct))
+    .RequireAuthorization("CheckInScannerAccess")
+    .WithName("GetEventSalesReportPdf")
+    .WithOpenApi();
+
+// Attendance Report Endpoints
+app.MapGet("/api/checkin/reports/event/{eventId:int}/attendance", (int eventId, string? format, HttpContext ctx, ClaimsPrincipal u, IEventReportService rs, IHttpClientFactory hcf, CancellationToken ct) =>
+    HandleAttendanceReport(eventId, format, ctx, u, rs, hcf, ct))
+    .RequireAuthorization("CheckInScannerAccess")
+    .WithName("GetEventAttendanceReport")
+    .WithOpenApi();
+
+app.MapGet("/api/checkin/reports/event/{eventId:int}/attendance/csv", (int eventId, HttpContext ctx, ClaimsPrincipal u, IEventReportService rs, IHttpClientFactory hcf, CancellationToken ct) =>
+    HandleAttendanceReport(eventId, "csv", ctx, u, rs, hcf, ct))
+    .RequireAuthorization("CheckInScannerAccess")
+    .WithName("GetEventAttendanceReportCsv")
+    .WithOpenApi();
+
+app.MapGet("/api/checkin/reports/event/{eventId:int}/attendance/pdf", (int eventId, HttpContext ctx, ClaimsPrincipal u, IEventReportService rs, IHttpClientFactory hcf, CancellationToken ct) =>
+    HandleAttendanceReport(eventId, "pdf", ctx, u, rs, hcf, ct))
+    .RequireAuthorization("CheckInScannerAccess")
+    .WithName("GetEventAttendanceReportPdf")
+    .WithOpenApi();
+
+// Report Aliases for Gateway & Analytics compatibility
+app.MapGet("/api/checkin/analytics/event/{eventId:int}/sales/export", (int eventId, string? format, HttpContext ctx, ClaimsPrincipal u, IEventReportService rs, IHttpClientFactory hcf, CancellationToken ct) =>
+    HandleSalesReport(eventId, format ?? "csv", ctx, u, rs, hcf, ct))
+    .RequireAuthorization("CheckInScannerAccess");
+
+app.MapGet("/api/checkin/analytics/event/{eventId:int}/attendance/export", (int eventId, string? format, HttpContext ctx, ClaimsPrincipal u, IEventReportService rs, IHttpClientFactory hcf, CancellationToken ct) =>
+    HandleAttendanceReport(eventId, format ?? "csv", ctx, u, rs, hcf, ct))
+    .RequireAuthorization("CheckInScannerAccess");
+
+app.MapGet("/api/reports/event/{eventId:int}/sales", (int eventId, string? format, HttpContext ctx, ClaimsPrincipal u, IEventReportService rs, IHttpClientFactory hcf, CancellationToken ct) =>
+    HandleSalesReport(eventId, format, ctx, u, rs, hcf, ct))
+    .RequireAuthorization("CheckInScannerAccess");
+
+app.MapGet("/api/reports/event/{eventId:int}/sales/csv", (int eventId, HttpContext ctx, ClaimsPrincipal u, IEventReportService rs, IHttpClientFactory hcf, CancellationToken ct) =>
+    HandleSalesReport(eventId, "csv", ctx, u, rs, hcf, ct))
+    .RequireAuthorization("CheckInScannerAccess");
+
+app.MapGet("/api/reports/event/{eventId:int}/sales/pdf", (int eventId, HttpContext ctx, ClaimsPrincipal u, IEventReportService rs, IHttpClientFactory hcf, CancellationToken ct) =>
+    HandleSalesReport(eventId, "pdf", ctx, u, rs, hcf, ct))
+    .RequireAuthorization("CheckInScannerAccess");
+
+app.MapGet("/api/reports/event/{eventId:int}/attendance", (int eventId, string? format, HttpContext ctx, ClaimsPrincipal u, IEventReportService rs, IHttpClientFactory hcf, CancellationToken ct) =>
+    HandleAttendanceReport(eventId, format, ctx, u, rs, hcf, ct))
+    .RequireAuthorization("CheckInScannerAccess");
+
+app.MapGet("/api/reports/event/{eventId:int}/attendance/csv", (int eventId, HttpContext ctx, ClaimsPrincipal u, IEventReportService rs, IHttpClientFactory hcf, CancellationToken ct) =>
+    HandleAttendanceReport(eventId, "csv", ctx, u, rs, hcf, ct))
+    .RequireAuthorization("CheckInScannerAccess");
+
+app.MapGet("/api/reports/event/{eventId:int}/attendance/pdf", (int eventId, HttpContext ctx, ClaimsPrincipal u, IEventReportService rs, IHttpClientFactory hcf, CancellationToken ct) =>
+    HandleAttendanceReport(eventId, "pdf", ctx, u, rs, hcf, ct))
+    .RequireAuthorization("CheckInScannerAccess");
+
 
 // =============================================================================
 // Backward compatibility coordinator endpoints & assignments
@@ -1395,26 +1455,6 @@ app.MapDelete("/api/checkin/assignments/{id:int}", async (
 .WithOpenApi();
 
 app.Run();
-
-// --- Internal DTO for CatalogService responses ---
-internal record CatalogEventResponse(
-    int Id,
-    string? Title,
-    string? Description,
-    string? Location,
-    string? Venue,
-    decimal Price,
-    DateTime EventDate,
-    int? UtcOffsetMinutes,
-    int CategoryId,
-    int OrganizerId,
-    string? OrganizerName,
-    string? ImageUrl,
-    int AvailableTickets,
-    string? TicketTiersJson,
-    DateTime CreatedAt,
-    bool IsHidder
-);
 
 public partial class Program { }
 

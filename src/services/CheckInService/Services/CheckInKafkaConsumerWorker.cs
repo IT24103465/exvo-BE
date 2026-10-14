@@ -10,15 +10,18 @@ public class CheckInKafkaConsumerWorker : BackgroundService
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly IConfiguration _configuration;
+    private readonly IRealtimeAnalyticsNotifier _realtimeNotifier;
     private readonly ILogger<CheckInKafkaConsumerWorker> _logger;
 
     public CheckInKafkaConsumerWorker(
         IServiceProvider serviceProvider,
         IConfiguration configuration,
+        IRealtimeAnalyticsNotifier realtimeNotifier,
         ILogger<CheckInKafkaConsumerWorker> logger)
     {
         _serviceProvider = serviceProvider;
         _configuration = configuration;
+        _realtimeNotifier = realtimeNotifier;
         _logger = logger;
     }
 
@@ -46,8 +49,8 @@ public class CheckInKafkaConsumerWorker : BackgroundService
         };
 
         using var consumer = new ConsumerBuilder<string, string>(config).Build();
-        consumer.Subscribe(new[] { "ticket.cancelled", "event.updated", "booking.confirmed.v1" });
-        _logger.LogInformation("Subscribed to ticket.cancelled, event.updated, and booking.confirmed.v1 at {Brokers}.", brokers);
+        consumer.Subscribe(new[] { "ticket.cancelled", "event.updated", "booking.confirmed.v1", "ticket.checked-in" });
+        _logger.LogInformation("Subscribed to ticket.cancelled, event.updated, booking.confirmed.v1, and ticket.checked-in at {Brokers}.", brokers);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -81,6 +84,7 @@ public class CheckInKafkaConsumerWorker : BackgroundService
                                 TimestampUtc = DateTime.UtcNow
                             });
                             db.SaveChanges();
+                            _realtimeNotifier.NotifyEventUpdated(cancelledEvent.EventId);
                         }
                     }
                     else if (topic == "event.updated")
@@ -97,6 +101,7 @@ public class CheckInKafkaConsumerWorker : BackgroundService
                                 TimestampUtc = DateTime.UtcNow
                             });
                             db.SaveChanges();
+                            _realtimeNotifier.NotifyEventUpdated(updatedEvent.EventId);
                         }
                     }
                     else if (topic == "booking.confirmed.v1")
@@ -114,6 +119,15 @@ public class CheckInKafkaConsumerWorker : BackgroundService
                                 TimestampUtc = DateTime.UtcNow
                             });
                             db.SaveChanges();
+                            _realtimeNotifier.NotifyEventUpdated(bookingEvent.EventId);
+                        }
+                    }
+                    else if (topic == "ticket.checked-in")
+                    {
+                        var checkedInEvent = JsonSerializer.Deserialize<TicketCheckedInEvent>(value);
+                        if (checkedInEvent != null)
+                        {
+                            _realtimeNotifier.NotifyEventUpdated(checkedInEvent.EventId);
                         }
                     }
                 }
