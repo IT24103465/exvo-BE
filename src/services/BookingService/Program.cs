@@ -522,8 +522,7 @@ app.MapGet("/api/booking/internal/tickets/{ticketCode}", async (string ticketCod
         .Include(i => i.Seat)
         .FirstOrDefaultAsync(i =>
             i.Id == itemId &&
-            i.Booking.BookingReference == bookingRef &&
-            i.Booking.Status == BookingStatus.Confirmed, ct);
+            i.Booking.BookingReference == bookingRef, ct);
 
     if (item is null)
         return Results.NotFound(new { status = "INVALID" });
