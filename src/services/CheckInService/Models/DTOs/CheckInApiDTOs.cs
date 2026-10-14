@@ -12,6 +12,8 @@ public static class TicketValidationStatus
     public const string WrongEvent = "WRONG_EVENT";
     public const string AlreadyUsed = "ALREADY_USED";
     public const string NotEligible = "NOT_ELIGIBLE";
+    public const string Cancelled = "CANCELLED";
+    public const string Expired = "EXPIRED";
 }
 
 public record ValidateTicketRequest(

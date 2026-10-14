@@ -73,6 +73,10 @@ builder.Services.AddAuthorization(options =>
         policy.RequireAuthenticatedUser()
               .RequireRole("Organizer", "Company", "Admin"));
 
+    options.AddPolicy("TicketScanAccess", policy =>
+        policy.RequireAuthenticatedUser()
+              .RequireRole("Organizer", "Company", "Admin", "Coordinator"));
+
     options.AddPolicy("CoordinatorScannerAccess", policy =>
         policy.RequireAuthenticatedUser()
               .RequireRole("Coordinator"));
@@ -195,6 +199,47 @@ static async Task<bool> ValidateEventOwnershipAsync(
     }
 }
 
+static async Task<bool> IsEventExpiredAsync(
+    int eventId,
+    IHttpClientFactory httpClientFactory,
+    TimeProvider timeProvider)
+{
+    try
+    {
+        var response = await httpClientFactory.CreateClient("CatalogService")
+            .GetAsync($"/api/catalog/events/{eventId}/ticket-snapshot");
+        if (!response.IsSuccessStatusCode) return false;
+
+        var eventData = await response.Content.ReadFromJsonAsync<CatalogEventResponse>();
+        if (eventData is null) return false;
+
+        return ToAssignedEventDto(eventData, timeProvider.GetUtcNow().UtcDateTime).ScannerCategory
+            == ScannerEventCategory.Past;
+    }
+    catch
+    {
+        return false;
+    }
+}
+
+static async Task<bool> CanScanEventAsync(
+    int eventId,
+    ClaimsPrincipal user,
+    CheckInDbContext db,
+    IHttpClientFactory httpClientFactory)
+{
+    if (user.IsInRole("Coordinator"))
+    {
+        var userId = GetUserId(user);
+        if (userId is null) return false;
+        return await db.CoordinatorAssignments.AsNoTracking()
+            .AnyAsync(a => a.CoordinatorUserId == userId.Value
+                        && a.EventId == eventId
+                        && a.Status == AssignmentStatus.Active);
+    }
+    return await ValidateEventOwnershipAsync(eventId, user, httpClientFactory);
+}
+
 // =============================================================================
 // 1. POST /api/checkin/verify – Verify QR ticket
 // =============================================================================
@@ -212,7 +257,7 @@ app.MapPost("/api/checkin/verify", async (
     if (userId is null) return Results.Forbid();
 
     // Verify event ownership for non-admin
-    if (!await ValidateEventOwnershipAsync(request.EventId, user, httpClientFactory))
+    if (!await CanScanEventAsync(request.EventId, user, db, httpClientFactory))
         return Results.Json(new ErrorDto("Access denied. You do not own this event."), statusCode: 403);
 
     var qrCode = request.QrCode.Trim();
@@ -224,7 +269,7 @@ app.MapPost("/api/checkin/verify", async (
     try
     {
         var response = await bookingClient.GetAsync(
-            $"/api/booking/internal/tickets/{Uri.EscapeDataString(qrCode)}?eventId={request.EventId}");
+            $"/api/booking/internal/tickets/{Uri.EscapeDataString(qrCode)}");
 
         if (response.IsSuccessStatusCode)
         {
@@ -270,6 +315,24 @@ app.MapPost("/api/checkin/verify", async (
             IsValid: false,
             Status: "Cancelled",
             Message: "This ticket has been cancelled.",
+            TicketId: ticketInfo.TicketId,
+            EventId: request.EventId,
+            BookingId: ticketInfo.BookingId,
+            AttendeeId: ticketInfo.AttendeeId,
+            AttendeeName: ticketInfo.AttendeeName,
+            TicketType: ticketInfo.TicketType,
+            SeatCode: ticketInfo.SeatCode,
+            ScannedAt: null
+        ));
+    }
+
+    if (!string.Equals(ticketInfo.Status, "Confirmed", StringComparison.OrdinalIgnoreCase)
+        && !string.Equals(ticketInfo.Status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.Ok(new VerifyTicketResponse(
+            IsValid: false,
+            Status: "NotEligible",
+            Message: $"Ticket is not eligible for check-in (Status: {ticketInfo.Status}).",
             TicketId: ticketInfo.TicketId,
             EventId: request.EventId,
             BookingId: ticketInfo.BookingId,
@@ -335,7 +398,7 @@ app.MapPost("/api/checkin/verify", async (
         ScannedAt: null
     ));
 })
-.RequireAuthorization("CheckInScannerAccess")
+.RequireAuthorization("TicketScanAccess")
 .WithName("VerifyTicket")
 .WithOpenApi();
 
@@ -350,7 +413,8 @@ app.MapPost("/api/checkin/validate", async (
     ClaimsPrincipal user,
     CheckInDbContext db,
     ICheckInOutboxService outboxService,
-    IHttpClientFactory httpClientFactory) =>
+    IHttpClientFactory httpClientFactory,
+    TimeProvider timeProvider) =>
 {
     if (string.IsNullOrWhiteSpace(request.Code) || request.EventId <= 0)
         return Results.BadRequest(new ErrorDto("Code and valid EventId are required."));
@@ -359,7 +423,7 @@ app.MapPost("/api/checkin/validate", async (
     if (userId is null) return Results.Forbid();
 
     // Enforce JWT authentication, Organizer/Admin authorization & event ownership
-    if (!await ValidateEventOwnershipAsync(request.EventId, user, httpClientFactory))
+    if (!await CanScanEventAsync(request.EventId, user, db, httpClientFactory))
         return Results.Json(new ErrorDto("Access denied. You do not own this event."), statusCode: 403);
 
     var code = request.Code.Trim();
@@ -370,7 +434,7 @@ app.MapPost("/api/checkin/validate", async (
     try
     {
         var response = await bookingClient.GetAsync(
-            $"/api/booking/internal/tickets/{Uri.EscapeDataString(code)}?eventId={request.EventId}");
+            $"/api/booking/internal/tickets/{Uri.EscapeDataString(code)}");
 
         if (response.IsSuccessStatusCode)
         {
@@ -418,7 +482,43 @@ app.MapPost("/api/checkin/validate", async (
         ));
     }
 
-    // 3. Status not confirmed (e.g., Cancelled, Pending, Refunded) -> NOT_ELIGIBLE
+    // 2b. Cancelled -> CANCELLED
+    if (string.Equals(ticketInfo.Status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.Ok(new ValidateTicketResponse(
+            IsValid: false,
+            Status: TicketValidationStatus.Cancelled,
+            Message: "This ticket has been cancelled.",
+            TicketId: ticketInfo.TicketId,
+            EventId: request.EventId,
+            BookingId: ticketInfo.BookingId,
+            AttendeeId: ticketInfo.AttendeeId,
+            AttendeeName: ticketInfo.AttendeeName,
+            TicketType: ticketInfo.TicketType,
+            SeatCode: ticketInfo.SeatCode,
+            ScannedAt: null
+        ));
+    }
+
+    // 2c. Event ended -> EXPIRED
+    if (await IsEventExpiredAsync(request.EventId, httpClientFactory, timeProvider))
+    {
+        return Results.Ok(new ValidateTicketResponse(
+            IsValid: false,
+            Status: TicketValidationStatus.Expired,
+            Message: "This event has ended. The ticket has expired.",
+            TicketId: ticketInfo.TicketId,
+            EventId: request.EventId,
+            BookingId: ticketInfo.BookingId,
+            AttendeeId: ticketInfo.AttendeeId,
+            AttendeeName: ticketInfo.AttendeeName,
+            TicketType: ticketInfo.TicketType,
+            SeatCode: ticketInfo.SeatCode,
+            ScannedAt: null
+        ));
+    }
+
+    // 3. Status not confirmed (e.g., Pending, Refunded) -> NOT_ELIGIBLE
     if (!string.Equals(ticketInfo.Status, "Confirmed", StringComparison.OrdinalIgnoreCase))
     {
         return Results.Ok(new ValidateTicketResponse(
@@ -473,7 +573,7 @@ app.MapPost("/api/checkin/validate", async (
         ScannedAt: null
     ));
 })
-.RequireAuthorization("CheckInScannerAccess")
+.RequireAuthorization("TicketScanAccess")
 .WithName("ValidateTicket")
 .WithOpenApi();
 
@@ -487,7 +587,8 @@ app.MapPost("/api/checkin/scan", async (
     ICheckInOutboxService outboxService,
     IHttpClientFactory httpClientFactory,
     IRealtimeAnalyticsNotifier realtimeNotifier,
-    CheckInConcurrencyGate concurrencyGate) =>
+    CheckInConcurrencyGate concurrencyGate,
+    TimeProvider timeProvider) =>
 {
     if (string.IsNullOrWhiteSpace(request.QrCode) || request.EventId <= 0)
         return Results.BadRequest(new ErrorDto("QrCode and valid EventId are required."));
@@ -496,7 +597,7 @@ app.MapPost("/api/checkin/scan", async (
     if (userId is null) return Results.Forbid();
 
     // Verify event ownership for non-admin
-    if (!await ValidateEventOwnershipAsync(request.EventId, user, httpClientFactory))
+    if (!await CanScanEventAsync(request.EventId, user, db, httpClientFactory))
         return Results.Json(new ErrorDto("Access denied. You do not own this event."), statusCode: 403);
 
     var qrCode = request.QrCode.Trim();
@@ -508,7 +609,7 @@ app.MapPost("/api/checkin/scan", async (
     try
     {
         var response = await bookingClient.GetAsync(
-            $"/api/booking/internal/tickets/{Uri.EscapeDataString(qrCode)}?eventId={request.EventId}");
+            $"/api/booking/internal/tickets/{Uri.EscapeDataString(qrCode)}");
 
         if (response.IsSuccessStatusCode)
         {
@@ -525,7 +626,8 @@ app.MapPost("/api/checkin/scan", async (
         // Record rejected scan
         var rejectedTicket = new ScannedTicket
         {
-            TicketId = 0,
+            // Unique negative id: ScannedTickets.TicketId has a unique index, so rejected rows must not collide.
+            TicketId = -Random.Shared.Next(1, int.MaxValue),
             EventId = request.EventId,
             BookingId = 0,
             AttendeeId = 0,
@@ -563,6 +665,27 @@ app.MapPost("/api/checkin/scan", async (
             Success: false,
             Status: "Rejected",
             Message: "This ticket has been cancelled and cannot be used.",
+            ScannedTicket: null
+        ));
+    }
+
+    // Server-side revalidation: expired events cannot be checked in
+    if (await IsEventExpiredAsync(request.EventId, httpClientFactory, timeProvider))
+    {
+        return Results.Ok(new ScanTicketResponse(
+            Success: false,
+            Status: "Rejected",
+            Message: "This event has ended. The ticket has expired.",
+            ScannedTicket: null
+        ));
+    }
+
+    if (!string.Equals(ticketInfo.Status, "Confirmed", StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.Ok(new ScanTicketResponse(
+            Success: false,
+            Status: "Rejected",
+            Message: $"Ticket is not eligible for check-in (Status: {ticketInfo.Status}).",
             ScannedTicket: null
         ));
     }
@@ -700,7 +823,7 @@ app.MapPost("/api/checkin/scan", async (
         ));
     }
 })
-.RequireAuthorization("CheckInScannerAccess")
+.RequireAuthorization("TicketScanAccess")
 .WithName("ScanTicket")
 .WithOpenApi();
 
@@ -754,7 +877,7 @@ app.MapGet("/api/checkin/event/{eventId:int}/stats", async (
 {
     if (eventId <= 0) return Results.BadRequest(new ErrorDto("Valid EventId is required."));
 
-    if (!await ValidateEventOwnershipAsync(eventId, user, httpClientFactory))
+    if (!await CanScanEventAsync(eventId, user, db, httpClientFactory))
         return Results.Json(new ErrorDto("Access denied. You do not own this event."), statusCode: 403);
 
     var totalCheckedIn = await db.ScannedTickets
@@ -773,7 +896,7 @@ app.MapGet("/api/checkin/event/{eventId:int}/stats", async (
         LastUpdatedUtc: DateTime.UtcNow
     ));
 })
-.RequireAuthorization("CheckInScannerAccess")
+.RequireAuthorization("TicketScanAccess")
 .WithName("GetAttendanceStats")
 .WithOpenApi();
 

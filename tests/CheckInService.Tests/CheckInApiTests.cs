@@ -187,6 +187,24 @@ public class MockHttpMessageHandler : HttpMessageHandler
             });
         }
 
+        if (uri.Contains("/api/catalog/events/12/ticket-snapshot"))
+        {
+            var json = """{ "id": 12, "title": "Past Show", "organizerId": 100, "eventDate": "2026-01-01T10:00:00Z" }""";
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            });
+        }
+
+        if (uri.Contains("/api/booking/internal/tickets/EXPIRED-EVENT-TICKET"))
+        {
+            var json = """{ "ticketCode": "EXPIRED-EVENT-TICKET", "ticketId": 120, "eventId": 12, "bookingId": 520, "attendeeId": 220, "attendeeName": "Old", "ticketType": "GA", "seatCode": "GA", "status": "Confirmed" }""";
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            });
+        }
+
         if (uri.Contains("/api/booking/internal/events/10/metrics"))
         {
             var json = """
@@ -377,7 +395,7 @@ public class CheckInApiTests : IClassFixture<WebApplicationFactory<Program>>
     }
 
     [Fact]
-    public async Task Validate_CancelledTicket_ReturnsNOT_ELIGIBLE()
+    public async Task Validate_CancelledTicket_ReturnsCANCELLED()
     {
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GenerateJwt(100, "Organizer"));
@@ -388,7 +406,7 @@ public class CheckInApiTests : IClassFixture<WebApplicationFactory<Program>>
         var result = await response.Content.ReadFromJsonAsync<ValidateTicketResponse>();
         Assert.NotNull(result);
         Assert.False(result.IsValid);
-        Assert.Equal(TicketValidationStatus.NotEligible, result.Status);
+        Assert.Equal(TicketValidationStatus.Cancelled, result.Status);
     }
 
     [Fact]
