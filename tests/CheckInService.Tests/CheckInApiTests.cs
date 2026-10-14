@@ -103,6 +103,27 @@ public class MockHttpMessageHandler : HttpMessageHandler
             });
         }
 
+        if (uri.Contains("/api/booking/internal/tickets/CONCURRENT-TICKET"))
+        {
+            var json = """
+            {
+                "ticketCode": "CONCURRENT-TICKET",
+                "ticketId": 108,
+                "eventId": 10,
+                "bookingId": 508,
+                "attendeeId": 208,
+                "attendeeName": "Race Attendee",
+                "ticketType": "VIP",
+                "seatCode": "R-01",
+                "status": "Confirmed"
+            }
+            """;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            });
+        }
+
         if (uri.Contains("/api/booking/internal/tickets/VALID-TICKET-STATS"))
         {
             var json = """
@@ -302,6 +323,119 @@ public class CheckInApiTests : IClassFixture<WebApplicationFactory<Program>>
     }
 
     [Fact]
+    public async Task Validate_ValidTicket_ReturnsVALID_AndDoesNotConsumeTicket()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GenerateJwt(100, "Organizer"));
+
+        var response = await client.PostAsJsonAsync("/api/checkin/validate", new ValidateTicketRequest("VALID-TICKET-1", 10));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<ValidateTicketResponse>();
+        Assert.NotNull(result);
+        Assert.True(result.IsValid);
+        Assert.Equal(TicketValidationStatus.Valid, result.Status);
+        Assert.Equal(101, result.TicketId);
+        Assert.Equal("John Doe", result.AttendeeName);
+        Assert.Null(result.ScannedAt);
+
+        // Verification that ticket was not consumed / marked as used in DB
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<CheckInDbContext>();
+        var scanRecord = await db.ScannedTickets.FirstOrDefaultAsync(s => s.TicketId == 101 && s.Status == ScannedTicketStatus.CheckedIn);
+        Assert.Null(scanRecord);
+    }
+
+    [Fact]
+    public async Task Validate_NonExistentTicket_ReturnsINVALID()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GenerateJwt(100, "Organizer"));
+
+        var response = await client.PostAsJsonAsync("/api/checkin/validate", new ValidateTicketRequest("NON-EXISTENT-CODE", 10));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<ValidateTicketResponse>();
+        Assert.NotNull(result);
+        Assert.False(result.IsValid);
+        Assert.Equal(TicketValidationStatus.Invalid, result.Status);
+    }
+
+    [Fact]
+    public async Task Validate_WrongEventTicket_ReturnsWRONG_EVENT()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GenerateJwt(100, "Organizer"));
+
+        var response = await client.PostAsJsonAsync("/api/checkin/validate", new ValidateTicketRequest("WRONG-EVENT-TICKET", 10));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<ValidateTicketResponse>();
+        Assert.NotNull(result);
+        Assert.False(result.IsValid);
+        Assert.Equal(TicketValidationStatus.WrongEvent, result.Status);
+    }
+
+    [Fact]
+    public async Task Validate_CancelledTicket_ReturnsNOT_ELIGIBLE()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GenerateJwt(100, "Organizer"));
+
+        var response = await client.PostAsJsonAsync("/api/checkin/validate", new ValidateTicketRequest("CANCELLED-TICKET", 10));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<ValidateTicketResponse>();
+        Assert.NotNull(result);
+        Assert.False(result.IsValid);
+        Assert.Equal(TicketValidationStatus.NotEligible, result.Status);
+    }
+
+    [Fact]
+    public async Task Validate_AlreadyUsedTicket_ReturnsALREADY_USED()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GenerateJwt(100, "Organizer"));
+
+        // First scan to check in VALID-TICKET-DUP
+        var scanRes = await client.PostAsJsonAsync("/api/checkin/scan", new ScanTicketRequest("VALID-TICKET-DUP", 10));
+        Assert.Equal(HttpStatusCode.OK, scanRes.StatusCode);
+
+        // Now validate the ticket
+        var valRes = await client.PostAsJsonAsync("/api/checkin/validate", new ValidateTicketRequest("VALID-TICKET-DUP", 10));
+        Assert.Equal(HttpStatusCode.OK, valRes.StatusCode);
+        var result = await valRes.Content.ReadFromJsonAsync<ValidateTicketResponse>();
+        Assert.NotNull(result);
+        Assert.False(result.IsValid);
+        Assert.Equal(TicketValidationStatus.AlreadyUsed, result.Status);
+        Assert.NotNull(result.ScannedAt);
+    }
+
+    [Fact]
+    public async Task Validate_UnauthorizedEventOwner_ReturnsForbidden()
+    {
+        var client = _factory.CreateClient();
+        // Organizer ID 999 does not own event 10 (owner is 100)
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GenerateJwt(999, "Organizer"));
+
+        var response = await client.PostAsJsonAsync("/api/checkin/validate", new ValidateTicketRequest("VALID-TICKET-1", 10));
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Validate_InvalidRequestBody_ReturnsBadRequest()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GenerateJwt(100, "Organizer"));
+
+        var response = await client.PostAsJsonAsync("/api/checkin/validate", new ValidateTicketRequest("", 10));
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+
+        var response2 = await client.PostAsJsonAsync("/api/checkin/validate", new ValidateTicketRequest("VALID-TICKET-1", 0));
+        Assert.Equal(HttpStatusCode.BadRequest, response2.StatusCode);
+    }
+
+    [Fact]
     public async Task Scan_ValidTicket_SucceedsAndPersistsOutboxAndScannedTicket()
     {
         var client = _factory.CreateClient();
@@ -454,5 +588,55 @@ public class CheckInApiTests : IClassFixture<WebApplicationFactory<Program>>
 
         var response = await client.GetAsync("/api/checkin/analytics/event/10/attendance");
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Scan_ConcurrentScans_AtomicallyAllowsOnlyOneSuccess()
+    {
+        var client1 = _factory.CreateClient();
+        var client2 = _factory.CreateClient();
+        var token = GenerateJwt(100, "Organizer");
+        client1.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        client2.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        // Initiate 2 parallel scan requests for the same ticket
+        var task1 = client1.PostAsJsonAsync("/api/checkin/scan", new ScanTicketRequest("CONCURRENT-TICKET", 10));
+        var task2 = client2.PostAsJsonAsync("/api/checkin/scan", new ScanTicketRequest("CONCURRENT-TICKET", 10));
+
+        var responses = await Task.WhenAll(task1, task2);
+        var results = new List<ScanTicketResponse>();
+        foreach (var r in responses)
+        {
+            Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+            var res = await r.Content.ReadFromJsonAsync<ScanTicketResponse>();
+            Assert.NotNull(res);
+            results.Add(res);
+        }
+
+        // Exactly one scan must succeed with "CheckedIn", and the other must be flagged as "Duplicate"
+        Assert.Single(results, r => r.Success && r.Status == "CheckedIn");
+        Assert.Single(results, r => !r.Success && r.Status == "Duplicate");
+    }
+
+    [Fact]
+    public async Task Validate_Performance_UnderLowLatencyThreshold()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GenerateJwt(100, "Organizer"));
+
+        // Warmup
+        await client.PostAsJsonAsync("/api/checkin/validate", new ValidateTicketRequest("VALID-TICKET-1", 10));
+
+        // Measure batch of validation calls
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < 20; i++)
+        {
+            var response = await client.PostAsJsonAsync("/api/checkin/validate", new ValidateTicketRequest("VALID-TICKET-1", 10));
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+        sw.Stop();
+
+        // 20 requests in test server should comfortably run under 2000ms
+        Assert.True(sw.ElapsedMilliseconds < 2000, $"Total execution time was {sw.ElapsedMilliseconds}ms, expected under 2000ms");
     }
 }

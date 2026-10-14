@@ -41,6 +41,8 @@ builder.Services.AddSingleton<IRealtimeAnalyticsNotifier, RealtimeAnalyticsNotif
 builder.Services.AddScoped<IEventAnalyticsService, EventAnalyticsService>();
 builder.Services.AddScoped<IEventReportService, EventReportService>();
 builder.Services.AddScoped<ICheckInOutboxService, CheckInOutboxService>();
+builder.Services.AddSingleton<CheckInConcurrencyGate>();
+builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddHostedService<OutboxPublisherWorker>();
 builder.Services.AddHostedService<CheckInKafkaConsumerWorker>();
 
@@ -338,6 +340,144 @@ app.MapPost("/api/checkin/verify", async (
 .WithOpenApi();
 
 // =============================================================================
+// 1b. POST /api/checkin/validate – SCRUM-31 QR Ticket Validation
+// Validates ticket authenticity, event matching, eligibility, and prior usage
+// without consuming or marking the ticket as used.
+// Returns: VALID, INVALID, WRONG_EVENT, ALREADY_USED, NOT_ELIGIBLE
+// =============================================================================
+app.MapPost("/api/checkin/validate", async (
+    ValidateTicketRequest request,
+    ClaimsPrincipal user,
+    CheckInDbContext db,
+    ICheckInOutboxService outboxService,
+    IHttpClientFactory httpClientFactory) =>
+{
+    if (string.IsNullOrWhiteSpace(request.Code) || request.EventId <= 0)
+        return Results.BadRequest(new ErrorDto("Code and valid EventId are required."));
+
+    var userId = GetUserId(user);
+    if (userId is null) return Results.Forbid();
+
+    // Enforce JWT authentication, Organizer/Admin authorization & event ownership
+    if (!await ValidateEventOwnershipAsync(request.EventId, user, httpClientFactory))
+        return Results.Json(new ErrorDto("Access denied. You do not own this event."), statusCode: 403);
+
+    var code = request.Code.Trim();
+
+    // Call BookingService internal endpoint to validate ticket code / existence
+    var bookingClient = httpClientFactory.CreateClient("BookingService");
+    TicketLookupResponse? ticketInfo = null;
+    try
+    {
+        var response = await bookingClient.GetAsync(
+            $"/api/booking/internal/tickets/{Uri.EscapeDataString(code)}?eventId={request.EventId}");
+
+        if (response.IsSuccessStatusCode)
+        {
+            ticketInfo = await response.Content.ReadFromJsonAsync<TicketLookupResponse>();
+        }
+    }
+    catch
+    {
+        return Results.Json(new ErrorDto("Booking service temporarily unavailable."), statusCode: 503);
+    }
+
+    // 1. Not found / malformed / not authentic -> INVALID
+    if (ticketInfo is null || ticketInfo.TicketId is null)
+    {
+        return Results.Ok(new ValidateTicketResponse(
+            IsValid: false,
+            Status: TicketValidationStatus.Invalid,
+            Message: "Ticket was not found or the validation code is invalid.",
+            TicketId: null,
+            EventId: request.EventId,
+            BookingId: null,
+            AttendeeId: null,
+            AttendeeName: null,
+            TicketType: null,
+            SeatCode: null,
+            ScannedAt: null
+        ));
+    }
+
+    // 2. Belongs to different event -> WRONG_EVENT
+    if (ticketInfo.EventId != request.EventId)
+    {
+        return Results.Ok(new ValidateTicketResponse(
+            IsValid: false,
+            Status: TicketValidationStatus.WrongEvent,
+            Message: "Ticket belongs to a different event.",
+            TicketId: ticketInfo.TicketId,
+            EventId: ticketInfo.EventId,
+            BookingId: ticketInfo.BookingId,
+            AttendeeId: ticketInfo.AttendeeId,
+            AttendeeName: ticketInfo.AttendeeName,
+            TicketType: ticketInfo.TicketType,
+            SeatCode: ticketInfo.SeatCode,
+            ScannedAt: null
+        ));
+    }
+
+    // 3. Status not confirmed (e.g., Cancelled, Pending, Refunded) -> NOT_ELIGIBLE
+    if (!string.Equals(ticketInfo.Status, "Confirmed", StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.Ok(new ValidateTicketResponse(
+            IsValid: false,
+            Status: TicketValidationStatus.NotEligible,
+            Message: $"Ticket is not eligible for check-in (Status: {ticketInfo.Status}).",
+            TicketId: ticketInfo.TicketId,
+            EventId: request.EventId,
+            BookingId: ticketInfo.BookingId,
+            AttendeeId: ticketInfo.AttendeeId,
+            AttendeeName: ticketInfo.AttendeeName,
+            TicketType: ticketInfo.TicketType,
+            SeatCode: ticketInfo.SeatCode,
+            ScannedAt: null
+        ));
+    }
+
+    // 4. Already checked in -> ALREADY_USED
+    var existingScan = await db.ScannedTickets
+        .AsNoTracking()
+        .FirstOrDefaultAsync(t => t.TicketId == ticketInfo.TicketId && t.Status == ScannedTicketStatus.CheckedIn);
+
+    if (existingScan is not null)
+    {
+        return Results.Ok(new ValidateTicketResponse(
+            IsValid: false,
+            Status: TicketValidationStatus.AlreadyUsed,
+            Message: $"Ticket has already been used and checked in at {existingScan.ScannedAt:u}.",
+            TicketId: existingScan.TicketId,
+            EventId: existingScan.EventId,
+            BookingId: existingScan.BookingId,
+            AttendeeId: existingScan.AttendeeId,
+            AttendeeName: existingScan.AttendeeName,
+            TicketType: existingScan.TicketType,
+            SeatCode: existingScan.SeatCode,
+            ScannedAt: existingScan.ScannedAt
+        ));
+    }
+
+    // 5. Eligible, authentic, unused -> VALID (Validation does not mark ticket as used)
+    return Results.Ok(new ValidateTicketResponse(
+        IsValid: true,
+        Status: TicketValidationStatus.Valid,
+        Message: "Ticket is valid for admission.",
+        TicketId: ticketInfo.TicketId,
+        EventId: ticketInfo.EventId,
+        BookingId: ticketInfo.BookingId,
+        AttendeeId: ticketInfo.AttendeeId,
+        AttendeeName: ticketInfo.AttendeeName,
+        TicketType: ticketInfo.TicketType,
+        SeatCode: ticketInfo.SeatCode,
+        ScannedAt: null
+    ));
+})
+.RequireAuthorization("CheckInScannerAccess")
+.WithName("ValidateTicket")
+.WithOpenApi();
+
+// =============================================================================
 // 2. POST /api/checkin/scan – Scan and check in a ticket
 // =============================================================================
 app.MapPost("/api/checkin/scan", async (
@@ -346,7 +486,8 @@ app.MapPost("/api/checkin/scan", async (
     CheckInDbContext db,
     ICheckInOutboxService outboxService,
     IHttpClientFactory httpClientFactory,
-    IRealtimeAnalyticsNotifier realtimeNotifier) =>
+    IRealtimeAnalyticsNotifier realtimeNotifier,
+    CheckInConcurrencyGate concurrencyGate) =>
 {
     if (string.IsNullOrWhiteSpace(request.QrCode) || request.EventId <= 0)
         return Results.BadRequest(new ErrorDto("QrCode and valid EventId are required."));
@@ -437,122 +578,127 @@ app.MapPost("/api/checkin/scan", async (
         ));
     }
 
-    // 2. Prevent duplicate scan using DB query first
-    var existingScan = await db.ScannedTickets
-        .FirstOrDefaultAsync(t => t.TicketId == ticketId && t.Status == ScannedTicketStatus.CheckedIn);
-
-    if (existingScan is not null)
+    // Guard atomic scan with in-process lock per ticket ID
+    using (await concurrencyGate.LockAsync(ticketId))
     {
-        return Results.Ok(new ScanTicketResponse(
-            Success: false,
-            Status: "Duplicate",
-            Message: $"Duplicate scan: ticket was already checked in at {existingScan.ScannedAt:u}.",
-            ScannedTicket: new ScannedTicketDto(
-                existingScan.Id,
-                existingScan.TicketId,
-                existingScan.EventId,
-                existingScan.BookingId,
-                existingScan.AttendeeId,
-                existingScan.ScannedBy,
-                existingScan.ScannedAt,
-                existingScan.Status.ToString(),
-                existingScan.AttendeeName,
-                existingScan.TicketType,
-                existingScan.SeatCode
-            )
-        ));
-    }
-
-    // 3. Atomic transaction to insert ScannedTicket and OutboxMessage
-    var scannedAt = DateTime.UtcNow;
-    var newScan = new ScannedTicket
-    {
-        TicketId = ticketId,
-        EventId = request.EventId,
-        BookingId = ticketInfo.BookingId,
-        AttendeeId = ticketInfo.AttendeeId ?? 0,
-        ScannedBy = userId.Value,
-        ScannedAt = scannedAt,
-        Status = ScannedTicketStatus.CheckedIn,
-        QrCodeHash = qrHash,
-        AttendeeName = ticketInfo.AttendeeName,
-        TicketType = ticketInfo.TicketType,
-        SeatCode = ticketInfo.SeatCode
-    };
-
-    db.ScannedTickets.Add(newScan);
-
-    // Audit log
-    db.AuditLogs.Add(new CheckInAuditLog
-    {
-        Action = "TicketCheckedIn",
-        TicketId = ticketId,
-        EventId = request.EventId,
-        UserId = userId.Value,
-        Details = $"Ticket checked in by User #{userId.Value}",
-        TimestampUtc = scannedAt
-    });
-
-    // Enqueue transactional outbox event
-    await outboxService.QueueEventAsync("ticket.checked-in", request.EventId.ToString(), new TicketCheckedInEvent(
-        TicketId: ticketId,
-        EventId: request.EventId,
-        BookingId: ticketInfo.BookingId,
-        AttendeeId: ticketInfo.AttendeeId ?? 0,
-        ScannedBy: userId.Value,
-        ScannedAt: scannedAt
-    ));
-
-    try
-    {
-        await db.SaveChangesAsync();
-        realtimeNotifier.NotifyEventUpdated(request.EventId);
-    }
-    catch (DbUpdateException)
-    {
-        // Concurrency / duplicate constraint hit
-        var raceScan = await db.ScannedTickets
+        // 2. Prevent duplicate scan using DB query first
+        var existingScan = await db.ScannedTickets
             .AsNoTracking()
             .FirstOrDefaultAsync(t => t.TicketId == ticketId && t.Status == ScannedTicketStatus.CheckedIn);
 
+        if (existingScan is not null)
+        {
+            return Results.Ok(new ScanTicketResponse(
+                Success: false,
+                Status: "Duplicate",
+                Message: $"Duplicate scan: ticket was already checked in at {existingScan.ScannedAt:u}.",
+                ScannedTicket: new ScannedTicketDto(
+                    existingScan.Id,
+                    existingScan.TicketId,
+                    existingScan.EventId,
+                    existingScan.BookingId,
+                    existingScan.AttendeeId,
+                    existingScan.ScannedBy,
+                    existingScan.ScannedAt,
+                    existingScan.Status.ToString(),
+                    existingScan.AttendeeName,
+                    existingScan.TicketType,
+                    existingScan.SeatCode
+                )
+            ));
+        }
+
+        // 3. Atomic transaction to insert ScannedTicket and OutboxMessage
+        var scannedAt = DateTime.UtcNow;
+        var newScan = new ScannedTicket
+        {
+            TicketId = ticketId,
+            EventId = request.EventId,
+            BookingId = ticketInfo.BookingId,
+            AttendeeId = ticketInfo.AttendeeId ?? 0,
+            ScannedBy = userId.Value,
+            ScannedAt = scannedAt,
+            Status = ScannedTicketStatus.CheckedIn,
+            QrCodeHash = qrHash,
+            AttendeeName = ticketInfo.AttendeeName,
+            TicketType = ticketInfo.TicketType,
+            SeatCode = ticketInfo.SeatCode
+        };
+
+        db.ScannedTickets.Add(newScan);
+
+        // Audit log
+        db.AuditLogs.Add(new CheckInAuditLog
+        {
+            Action = "TicketCheckedIn",
+            TicketId = ticketId,
+            EventId = request.EventId,
+            UserId = userId.Value,
+            Details = $"Ticket checked in by User #{userId.Value}",
+            TimestampUtc = scannedAt
+        });
+
+        // Enqueue transactional outbox event
+        await outboxService.QueueEventAsync("ticket.checked-in", request.EventId.ToString(), new TicketCheckedInEvent(
+            TicketId: ticketId,
+            EventId: request.EventId,
+            BookingId: ticketInfo.BookingId,
+            AttendeeId: ticketInfo.AttendeeId ?? 0,
+            ScannedBy: userId.Value,
+            ScannedAt: scannedAt
+        ));
+
+        try
+        {
+            await db.SaveChangesAsync();
+            realtimeNotifier.NotifyEventUpdated(request.EventId);
+        }
+        catch (DbUpdateException)
+        {
+            // Concurrency / duplicate constraint hit
+            var raceScan = await db.ScannedTickets
+                .AsNoTracking()
+                .FirstOrDefaultAsync(t => t.TicketId == ticketId && t.Status == ScannedTicketStatus.CheckedIn);
+
+            return Results.Ok(new ScanTicketResponse(
+                Success: false,
+                Status: "Duplicate",
+                Message: "Duplicate scan: ticket was already checked in.",
+                ScannedTicket: raceScan != null ? new ScannedTicketDto(
+                    raceScan.Id,
+                    raceScan.TicketId,
+                    raceScan.EventId,
+                    raceScan.BookingId,
+                    raceScan.AttendeeId,
+                    raceScan.ScannedBy,
+                    raceScan.ScannedAt,
+                    raceScan.Status.ToString(),
+                    raceScan.AttendeeName,
+                    raceScan.TicketType,
+                    raceScan.SeatCode
+                ) : null
+            ));
+        }
+
         return Results.Ok(new ScanTicketResponse(
-            Success: false,
-            Status: "Duplicate",
-            Message: "Duplicate scan: ticket was already checked in.",
-            ScannedTicket: raceScan != null ? new ScannedTicketDto(
-                raceScan.Id,
-                raceScan.TicketId,
-                raceScan.EventId,
-                raceScan.BookingId,
-                raceScan.AttendeeId,
-                raceScan.ScannedBy,
-                raceScan.ScannedAt,
-                raceScan.Status.ToString(),
-                raceScan.AttendeeName,
-                raceScan.TicketType,
-                raceScan.SeatCode
-            ) : null
+            Success: true,
+            Status: "CheckedIn",
+            Message: "Ticket successfully checked in.",
+            ScannedTicket: new ScannedTicketDto(
+                newScan.Id,
+                newScan.TicketId,
+                newScan.EventId,
+                newScan.BookingId,
+                newScan.AttendeeId,
+                newScan.ScannedBy,
+                newScan.ScannedAt,
+                newScan.Status.ToString(),
+                newScan.AttendeeName,
+                newScan.TicketType,
+                newScan.SeatCode
+            )
         ));
     }
-
-    return Results.Ok(new ScanTicketResponse(
-        Success: true,
-        Status: "CheckedIn",
-        Message: "Ticket successfully checked in.",
-        ScannedTicket: new ScannedTicketDto(
-            newScan.Id,
-            newScan.TicketId,
-            newScan.EventId,
-            newScan.BookingId,
-            newScan.AttendeeId,
-            newScan.ScannedBy,
-            newScan.ScannedAt,
-            newScan.Status.ToString(),
-            newScan.AttendeeName,
-            newScan.TicketType,
-            newScan.SeatCode
-        )
-    ));
 })
 .RequireAuthorization("CheckInScannerAccess")
 .WithName("ScanTicket")
@@ -975,10 +1121,42 @@ app.MapGet("/api/reports/event/{eventId:int}/attendance/pdf", (int eventId, Http
 // =============================================================================
 // Backward compatibility coordinator endpoints & assignments
 // =============================================================================
+
+// Classifies an event by its local calendar day (EventDate is UTC; UtcOffsetMinutes
+// gives the venue offset). The scanner may only be launched on the event day.
+static AssignedEventDto ToAssignedEventDto(CatalogEventResponse e, DateTime nowUtc)
+{
+    var offset = TimeSpan.FromMinutes(e.UtcOffsetMinutes ?? 0);
+    var eventUtc = e.EventDate.Kind == DateTimeKind.Local ? e.EventDate.ToUniversalTime() : e.EventDate;
+    var eventDay = DateOnly.FromDateTime(eventUtc + offset);
+    var today = DateOnly.FromDateTime(nowUtc + offset);
+
+    var category = eventDay == today ? ScannerEventCategory.Today
+        : eventDay > today ? ScannerEventCategory.Upcoming
+        : ScannerEventCategory.Past;
+
+    return new AssignedEventDto(
+        e.Id,
+        e.Title ?? string.Empty,
+        e.EventDate,
+        e.Venue,
+        e.Location,
+        e.IsHidder,
+        category,
+        category == ScannerEventCategory.Today);
+}
+
+// Today first, then upcoming (soonest first), then past (most recent first).
+static List<AssignedEventDto> OrderForScannerPortal(List<AssignedEventDto> events) =>
+    events.Where(e => e.ScannerCategory == ScannerEventCategory.Today).OrderBy(e => e.EventDate)
+        .Concat(events.Where(e => e.ScannerCategory == ScannerEventCategory.Upcoming).OrderBy(e => e.EventDate))
+        .Concat(events.Where(e => e.ScannerCategory == ScannerEventCategory.Past).OrderByDescending(e => e.EventDate))
+        .ToList();
 app.MapGet("/api/checkin/coordinator/events", async (
     ClaimsPrincipal user,
     CheckInDbContext db,
-    IHttpClientFactory httpClientFactory) =>
+    IHttpClientFactory httpClientFactory,
+    TimeProvider timeProvider) =>
 {
     var userId = GetUserId(user);
     if (userId is null) return Results.Forbid();
@@ -1005,21 +1183,14 @@ app.MapGet("/api/checkin/coordinator/events", async (
                 var eventData = await response.Content.ReadFromJsonAsync<CatalogEventResponse>();
                 if (eventData is not null)
                 {
-                    assignedEvents.Add(new AssignedEventDto(
-                        eventData.Id,
-                        eventData.Title ?? string.Empty,
-                        eventData.EventDate,
-                        eventData.Venue,
-                        eventData.Location,
-                        eventData.IsHidder
-                    ));
+                    assignedEvents.Add(ToAssignedEventDto(eventData, timeProvider.GetUtcNow().UtcDateTime));
                 }
             }
         }
         catch { }
     }
 
-    return Results.Ok(assignedEvents);
+    return Results.Ok(OrderForScannerPortal(assignedEvents));
 })
 .RequireAuthorization("CoordinatorScannerAccess")
 .WithName("GetCoordinatorAssignedEvents")
@@ -1028,7 +1199,8 @@ app.MapGet("/api/checkin/coordinator/events", async (
 app.MapGet("/api/coordinator/events", async (
     ClaimsPrincipal user,
     CheckInDbContext db,
-    IHttpClientFactory httpClientFactory) =>
+    IHttpClientFactory httpClientFactory,
+    TimeProvider timeProvider) =>
 {
     var userId = GetUserId(user);
     if (userId is null) return Results.Forbid();
@@ -1055,21 +1227,14 @@ app.MapGet("/api/coordinator/events", async (
                 var eventData = await response.Content.ReadFromJsonAsync<CatalogEventResponse>();
                 if (eventData is not null)
                 {
-                    assignedEvents.Add(new AssignedEventDto(
-                        eventData.Id,
-                        eventData.Title ?? string.Empty,
-                        eventData.EventDate,
-                        eventData.Venue,
-                        eventData.Location,
-                        eventData.IsHidder
-                    ));
+                    assignedEvents.Add(ToAssignedEventDto(eventData, timeProvider.GetUtcNow().UtcDateTime));
                 }
             }
         }
         catch { }
     }
 
-    return Results.Ok(assignedEvents);
+    return Results.Ok(OrderForScannerPortal(assignedEvents));
 })
 .RequireAuthorization("CoordinatorScannerAccess")
 .WithName("GetCoordinatorAssignedEventsDirect")
@@ -1079,7 +1244,8 @@ app.MapGet("/api/checkin/coordinator/events/{eventId:int}/access", async (
     int eventId,
     ClaimsPrincipal user,
     CheckInDbContext db,
-    IHttpClientFactory httpClientFactory) =>
+    IHttpClientFactory httpClientFactory,
+    TimeProvider timeProvider) =>
 {
     var userId = GetUserId(user);
     if (userId is null) return Results.Forbid();
@@ -1104,17 +1270,19 @@ app.MapGet("/api/checkin/coordinator/events/{eventId:int}/access", async (
         if (eventData is null)
             return Results.Json(new ErrorDto("Access denied."), statusCode: 403);
 
+        var eventDto = ToAssignedEventDto(eventData, timeProvider.GetUtcNow().UtcDateTime);
+        if (!eventDto.CanLaunchScanner)
+        {
+            var reason = eventDto.ScannerCategory == ScannerEventCategory.Past
+                ? "This event has ended. The scanner is no longer available."
+                : "The scanner is only available on the event day.";
+            return Results.Json(new ErrorDto(reason), statusCode: 403);
+        }
+
         return Results.Ok(new ScannerAccessDto(
             EventId: eventId,
             CanAccessScanner: true,
-            Event: new AssignedEventDto(
-                eventData.Id,
-                eventData.Title ?? string.Empty,
-                eventData.EventDate,
-                eventData.Venue,
-                eventData.Location,
-                eventData.IsHidder
-            )
+            Event: eventDto
         ));
     }
     catch
@@ -1130,7 +1298,8 @@ app.MapGet("/api/coordinator/events/{eventId:int}/access", async (
     int eventId,
     ClaimsPrincipal user,
     CheckInDbContext db,
-    IHttpClientFactory httpClientFactory) =>
+    IHttpClientFactory httpClientFactory,
+    TimeProvider timeProvider) =>
 {
     var userId = GetUserId(user);
     if (userId is null) return Results.Forbid();
@@ -1155,17 +1324,19 @@ app.MapGet("/api/coordinator/events/{eventId:int}/access", async (
         if (eventData is null)
             return Results.Json(new ErrorDto("Access denied."), statusCode: 403);
 
+        var eventDto = ToAssignedEventDto(eventData, timeProvider.GetUtcNow().UtcDateTime);
+        if (!eventDto.CanLaunchScanner)
+        {
+            var reason = eventDto.ScannerCategory == ScannerEventCategory.Past
+                ? "This event has ended. The scanner is no longer available."
+                : "The scanner is only available on the event day.";
+            return Results.Json(new ErrorDto(reason), statusCode: 403);
+        }
+
         return Results.Ok(new ScannerAccessDto(
             EventId: eventId,
             CanAccessScanner: true,
-            Event: new AssignedEventDto(
-                eventData.Id,
-                eventData.Title ?? string.Empty,
-                eventData.EventDate,
-                eventData.Venue,
-                eventData.Location,
-                eventData.IsHidder
-            )
+            Event: eventDto
         ));
     }
     catch
@@ -1287,3 +1458,34 @@ app.Run();
 
 public partial class Program { }
 
+/// <summary>
+/// Thread-safe in-process concurrency gate to prevent race conditions during ticket scan/check-in.
+/// </summary>
+public sealed class CheckInConcurrencyGate
+{
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, SemaphoreSlim> _ticketLocks = new();
+
+    public async Task<IDisposable> LockAsync(int ticketId, CancellationToken cancellationToken = default)
+    {
+        var sem = _ticketLocks.GetOrAdd(ticketId, _ => new SemaphoreSlim(1, 1));
+        await sem.WaitAsync(cancellationToken);
+        return new Releaser(sem);
+    }
+
+    private sealed class Releaser : IDisposable
+    {
+        private readonly SemaphoreSlim _semaphore;
+        private bool _disposed;
+
+        public Releaser(SemaphoreSlim semaphore) => _semaphore = semaphore;
+
+        public void Dispose()
+        {
+            if (!_disposed)
+            {
+                _disposed = true;
+                _semaphore.Release();
+            }
+        }
+    }
+}
