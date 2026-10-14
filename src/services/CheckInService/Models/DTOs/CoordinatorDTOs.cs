@@ -46,7 +46,10 @@ public record CoordinatorAssignmentDto(
 public record ErrorDto(string Message);
 
 /// <summary>Request body for POST /api/coordinator/events/{eventId}/check-in.</summary>
-public record CheckInRequest(string TicketCode);
+public record CheckInRequest(string? TicketCode = null, string? Code = null)
+{
+    public string EffectiveCode => !string.IsNullOrWhiteSpace(TicketCode) ? TicketCode.Trim() : (Code?.Trim() ?? string.Empty);
+}
 
 /// <summary>Result returned after scanning a ticket.</summary>
 public record CheckInResultDto(
