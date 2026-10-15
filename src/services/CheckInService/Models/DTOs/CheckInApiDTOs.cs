@@ -17,9 +17,13 @@ public static class TicketValidationStatus
 }
 
 public record ValidateTicketRequest(
-    string Code,
-    int EventId
-);
+    string? Code = null,
+    int? EventId = null,
+    string? TicketCode = null
+)
+{
+    public string EffectiveCode => !string.IsNullOrWhiteSpace(TicketCode) ? TicketCode.Trim() : (Code?.Trim() ?? string.Empty);
+}
 
 public record ValidateTicketResponse(
     bool IsValid,
