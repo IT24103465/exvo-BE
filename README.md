@@ -240,311 +240,59 @@ The test projects use xUnit for automated verification.
 
 ### Mutation testing with Stryker.NET
 
-The pilot selects `BookingService` and
-`tests/BookingService.Tests/Exvo.BookingService.Tests.csproj`. Unlike Auth's
-placeholder test, this project references production code and has working unit
-and API tests. The scope is deliberately limited to
-`src/services/BookingService/Services/EventInventoryCatalogClient.cs`: ticket-tier
-quantities (including unlimited inventory), pricing, general-admission fallback,
-and event snapshots. This is a pilot score for one file, not the whole backend.
-Only `EventInventoryCatalogClientTests` run during mutation testing; the API tests
-replace this client with a stub and cannot detect mutations in it.
+The repository-local tool manifest (`dotnet-tools.json`) pins Stryker.NET 4.16.0.
+The application and tests target .NET 8, and Stryker 4.x requires the .NET 8
+runtime. Install the .NET 8 SDK (which includes the runtime), and ensure NuGet is
+reachable for the initial restores. No database, Kafka, credentials, or running
+Catalog service is needed. See the [Stryker 4.x to 5.x migration guide](https://stryker-mutator.io/docs/stryker-net/migration-guide/)
+for runtime requirements and the [Stryker configuration reference](https://stryker-mutator.io/docs/stryker-net/configuration/)
+for option syntax.
 
-Install the .NET 8 SDK and runtime (including ASP.NET Core). The repository local
-tool manifest pins Stryker.NET **4.16.0**, which runs on .NET 8; Stryker 5 requires
-the .NET 10 runtime. Application and test target frameworks remain `net8.0`.
-See the [4.16.0 package](https://www.nuget.org/packages/dotnet-stryker/4.16.0)
-and [Stryker migration guide](https://stryker-mutator.io/docs/stryker-net/migration-guide/).
-NuGet access is needed for the initial restores. No database, Kafka, credentials,
-or running Catalog service is needed for the focused unit tests.
+Mutation scope is deliberately limited to
+`src/services/BookingService/Services/EventInventoryCatalogClient.cs`. Its direct
+contract tests cover ticket quantities, tier values and aliases, general-admission
+fallback, Catalog HTTP errors, and event snapshots. Stryker filters to
+`EventInventoryCatalogClientTests`, `TicketQuantityUnitTests`, and
+`CatalogErrorUnitTests`; the full BookingService test project is run first. Startup,
+API infrastructure, migrations, generated code, and unrelated services are not in
+the mutation scope.
 
-From the backend root:
-
-```powershell
-dotnet --info
-dotnet tool restore
-dotnet test tests/BookingService.Tests/Exvo.BookingService.Tests.csproj --configuration Release
-cd tests/BookingService.Tests
-dotnet stryker --config-file stryker-config.json --log-to-file
-```
-
-Run Stryker from the test directory so project discovery and relative mutation
-paths resolve correctly. The checked-in configuration uses two workers and
-outputs progress, HTML, and JSON reports, with a 10-second additional timeout
-allowance. Coverage optimization is explicitly off for predictable execution of
-this small suite: all 27 focused test cases run against every selected mutant.
-Reports are generated under
-`tests/BookingService.Tests/StrykerOutput/<run-timestamp>/reports/` as
-`mutation-report.html` and `mutation-report.json`. Open the HTML file in a browser
-and select the source file to inspect each mutation and the tests that detected it.
-Generated output is ignored by Git; retain reports when comparing runs.
-
-- **Killed**: a test failed when Stryker introduced the change, so assertions
-  detected that fault.
-- **Survived**: tests executed the mutated code but passed; inspect whether a
-  meaningful assertion or input is missing, or whether the mutation is equivalent.
-- **NoCoverage**: no selected test exercised the mutation; add a test of the
-  corresponding behavior before expecting it to be detected.
-- **Timeout**: counted as detected, but inspect for hangs rather than assuming
-  an assertion caught it. Compile/runtime errors and ignored mutants are reported
-  separately and do not establish test quality.
-
-The score is detected mutants (`Killed` + `Timeout`) divided by detected plus
-undetected (`Survived` + `NoCoverage`) mutants. Review the counts as well as the
-percentage. Threshold colors are green at 80%, amber at 60%, and red below 60%.
-The break threshold is 0: score alone does not fail this exploratory pilot;
-configuration, build, and test failures still fail the mutation command.
-Do not alter production behavior or exclude surviving mutants to inflate the score.
-
-In GitHub Actions, run **Backend Mutation Testing** from the Actions tab using
-**Run workflow** (`.github/workflows/backend-mutation.yml`). It is manual and
-separate from the existing CI/CD workflows, so mutation work does not delay normal
-builds or deploys. Its explicit matrix contains Booking, Catalog, Auth, and Ticket
-(not CheckIn),
-with independent jobs and `fail-fast: false`. Each job runs that service's full
-tests first, then its scoped mutation command, with a 20-minute limit per job.
-The `<service>-mutation-<run-id>` artifacts
-retains HTML/JSON reports and available logs for 14 days and uploads even if a
-prior step fails (a failure before report generation may leave no report).
-The workflow also rejects reports with no killed or surviving mutants, preventing
-an all-timeout result from masquerading as a useful 100% score.
-
-If all mutants time out, inspect `StrykerOutput/<run-timestamp>/logs/` before
-interpreting the score. During local validation, Windows Application Control
-blocked the generated assembly (`0x800711C7`), leading to zero executed tests
-and misleading all-timeout scores. Use an environment permitted to load generated
-assemblies, such as the Linux CI runner; increasing timeouts does not fix this block.
-
-#### Pilot results and surviving mutants
-
-Validated on 12 October 2026 with SDKs 8.0.424 and 10.0.401 installed (.NET
-8.0.30 runtime available; local commands selected SDK 10.0.401). The baseline
-Booking suite passed 20 tests. After adding meaningful catalog-client coverage,
-the full suite passed 46 tests, including 27 focused cases. Production code and
-target frameworks were not changed.
-
-The initial mutation score was **15.12%** (13 killed, 33 survived, 40 uncovered).
-The validated final run scored **83.72%** (72 killed / 86 assessed, 14 survived,
-0 timeouts), taking approximately 2 minutes 22 seconds. In the selected file,
-5 additional mutants could not compile and 13 were automatically ignored by
-Stryker's redundant-block filter; neither group contributes to the score.
-With coverage optimization off, `NoCoverage` is not classified separately.
-The final local HTML report is
-`tests/BookingService.Tests/StrykerOutput/2026-10-12.08-53-53/reports/mutation-report.html`.
-Earlier all-timeout reports are invalid for assessing test quality.
-
-Representative initial gaps now covered include changing the unlimited quantity
-boundary from `<= 0` to `< 0` (assert quantity zero remains unlimited), forcing
-finite quantity to zero (assert positive quantities are retained), dropping tier
-prices or names (assert complete tier values), deleting general-admission fallback
-(assert positive inventory with missing tiers), and dropping snapshot fields or
-their aliases (assert complete snapshots, fallback values, and precedence).
-HTTP 404/500 and endpoint-routing tests also detect lost error handling and paths.
-
-All 14 final survivors appear equivalent through the current public API:
-
-| Representative mutants (IDs in this run) | Why they survive / test implications |
-| --- | --- |
-| 1441-1444, line 36; 1445-1448, line 37 | `GetInt`/`GetDecimal` lookups ignore casing, so the PascalCase lookup duplicates the camelCase lookup. Removing either duplicate does not change the result. Numeric and string-value tests already assert inventory and fallback pricing; no public input distinguishes these mutants. |
-| 1490, 1492-1495, line 70 | Both tier-property lookups ignore casing and return the same result. Replacing the conjunction or removing either duplicate lookup preserves observable behavior. Tests cover uppercase properties, missing tiers, and array/string representations; another casing test would not kill an equivalent mutant. |
-| 1528, line 118 | Returning `true` instead of `false` for a missing property still supplies a default/undefined `JsonElement`. The public callers treat that value as missing and produce the same defaults. Missing/unsupported-field tests already assert this behavior; testing the private Boolean directly would couple tests to implementation without improving the public contract. |
-
-These are equivalence assessments, not exclusions: the survivors remain visible
-in the report. Investigate other survivors when extending the scope or changing
-the parsing contract. The local .NET 10 SDK also emitted a nonfatal newer-Razor-
-analyzer warning; the manual CI workflow selects .NET 8. The workflow is prepared
-but has not been dispatched on GitHub from this local checkout.
-
-#### Additional completed-service scope
-
-The extensions reuse the pinned local Stryker.NET 4.16.0 tool and .NET 8 target
-frameworks. They add Catalog, Auth, and Ticket scopes without changing Booking's
-configuration, tests, or saved pilot report. Scores describe the selected files, not entire
-services or the solution.
-
-| Service | Eligibility and mutation scope |
-| --- | --- |
-| Booking | Existing pilot retained: `Services/EventInventoryCatalogClient.cs`, using `EventInventoryCatalogClientTests` only. |
-| Catalog | Existing 22 tests passed before edits. Mutate `EventAccess.cs` and `EventSchedule.cs`, using all tests in `tests/CatalogService.Tests/Exvo.CatalogService.Tests.csproj`. Covers organizer access, schedule validation, UTC conversion, expiry queries, and persisted expiry visibility. |
-| Auth | `Services/TokenServices.cs`, using `TokenServiceTests`. The former empty test was replaced with real JWT signature, issuer/audience, identity/role, optional-field, identifier, and expiry checks; the test project now references production. |
-| Ticket | `Services/BookingConfirmedConsumer.cs`, using `BookingConfirmedConsumerTests` in the new test project. Covers disabled-consumer configuration and cancellation before entering the configured Kafka loop. Kafka processing remains uncovered; this is not a score for complete ticket issuance. |
-| CheckIn | Explicitly excluded because the service is incomplete; neither its tests nor production code are part of this workflow. |
-
-No candidate baseline tests failed. Catalog's suite contains both direct unit
-tests and API tests backed by EF's in-memory provider; its SQL-translation test
-uses the MySQL provider without connecting to MySQL. No external services or
-credentials are required. The mutation scope excludes startup, migrations,
-database configuration, and the background worker.
-
-From the backend root, restore the existing tool and run the service baseline:
+Run from the repository root in PowerShell:
 
 ```powershell
 dotnet tool restore
-dotnet test tests/CatalogService.Tests/Exvo.CatalogService.Tests.csproj --configuration Release
-cd tests/CatalogService.Tests
+dotnet restore tests\BookingService.Tests\Exvo.BookingService.Tests.csproj
+dotnet test tests\BookingService.Tests\Exvo.BookingService.Tests.csproj --configuration Release --no-restore
+Set-Location tests\BookingService.Tests
 dotnet stryker --config-file stryker-config.json --log-to-file
 ```
 
-For Booking, use the existing commands above. Always run mutation commands from
-the corresponding test directory. Separate project directories and timestamped
-output keep reports from overwriting each other:
+Stryker writes HTML and JSON reports to
+`tests/BookingService.Tests/StrykerOutput/<run-timestamp>/reports/` and diagnostic
+logs to the sibling `logs/` directory. Open `mutation-report.html` to inspect
+individual mutations and the tests that killed them. Generated output is ignored
+by Git; the manifest and `stryker-config.json` are tracked.
 
-- Booking: `tests/BookingService.Tests/StrykerOutput/<run-timestamp>/reports/mutation-report.html`.
-- Catalog: `tests/CatalogService.Tests/StrykerOutput/<run-timestamp>/reports/mutation-report.html`.
-- Auth: `tests/AuthService.Tests/StrykerOutput/<run-timestamp>/reports/mutation-report.html`.
-- Ticket: `tests/TicketService.Tests/StrykerOutput/<run-timestamp>/reports/mutation-report.html`.
-- JSON reports are adjacent to the HTML; diagnostic logs are under each run's
-  `logs/` directory. Generated output remains ignored by Git.
+The configured break threshold is **80%** (high: 90%, low: 80%). The first fresh
+run against the original 27-test suite scored 23.26% (20 killed, 26 survived, 40
+uncovered). Tests were added for missing observable mappings and edge cases; the
+final local run scored 83.72% (72 killed, 14 survived, 0 uncovered, 0 timeouts).
+The 80% gate is based on that measured result, not on the older ignored reports;
+it is not lowered to accommodate CI. Five target-file mutants failed to compile
+and 13 redundant block mutants were ignored by Stryker; neither is included in
+the score. The 14 remaining survivors appear equivalent through the public
+client contract: duplicate casing fallbacks are equivalent because property
+lookup is case-insensitive, and a missing-property default `JsonElement` has the
+same downstream result. Keep them visible and reassess if the parsing contract
+changes; do not treat every survivor as a defect.
 
-Catalog uses two workers, a 10-second additional timeout, and `perTest` coverage
-analysis, which completed successfully locally. This distinguishes `NoCoverage`
-from executed survivors and selects relevant tests for each mutant. Booking
-retains its existing coverage-off setting, so its zero reported `NoCoverage`
-count does not establish coverage of every branch. Both stop on an initial test
-failure, use the same 80/60/0 thresholds, and generate separate HTML/JSON reports.
-
-The matrix workflow remains manual-only. Dispatch **Backend Mutation Testing**
-in GitHub Actions to run all four configured services, then download each service's
-artifact and open its HTML report. Artifacts retain reports/logs for 14 days and
-upload even on failure. GitHub Actions has not been dispatched from this checkout;
-the results documented here are local runs.
-
-#### Extension validation and Catalog survivors
-
-Catalog's baseline passed 22 tests. Its first scoped mutation run scored 65.91%
-(29 killed, 14 survived, 1 uncovered, 0 timeouts). Adding 24 direct domain cases
-in `EventDomainTests.cs` brought the suite to 46 passing tests. They check Company
-role access, authentication, subject-claim fallback and precedence, valid offset
-limits, exact-time boundaries, actionable validation errors, date-range overflow,
-UTC conversion, and complementary expired/upcoming queries. No production code
-was changed.
-
-| Service / report | Score | Killed | Survived | NoCoverage | Timeout |
-| --- | --- | --- | --- | --- | --- |
-| Booking preserved pilot and local recheck | 83.72% | 72 | 14 | 0 (not classified with coverage off) | 0 |
-| Catalog final local run | 97.73% | 43 | 1 | 0 | 0 |
-
-Catalog's final report is
-`tests/CatalogService.Tests/StrykerOutput/2026-10-12.10-22-24/reports/mutation-report.html`.
-The run took approximately 1 minute 16 seconds. The two selected files also
-contain 8 compile-error mutants and 5 mutants automatically ignored by Stryker's
-redundant-block filter; these do not enter the score. Both HTML reports are kept
-in their own test directories; the original Booking pilot report is retained.
-Booking's unchanged mutation command was also rerun successfully, producing
-the same 72-killed/14-survived result in approximately 1 minute 29 seconds at
-`tests/BookingService.Tests/StrykerOutput/2026-10-12.10-24-36/reports/mutation-report.html`.
-Its original `2026-10-12.08-53-53` report remains byte-for-byte intact.
-
-The remaining Catalog survivor is **104**, `EventSchedule.cs:24`: removing the
-early `return` when `expiredEvents.Count == 0`. Existing tests see the same event
-data, but the mutant calls `SaveChangesAsync` even when nothing expired. A test
-would distinguish it by creating only future events, making an unrelated pending
-edit in that context, calling `HideExpiredAsync`, and reading through a fresh
-context to assert that the pending edit was not persisted. Establish that
-no-expiry/no-write guarantee as an intended contract before adding that regression
-test; asserting only the number of internal save calls would not add useful
-behavior coverage. The survivor remains included, without a production change
-or mutation exclusion.
-
-Representative initial survivors that the added tests now kill include removing
-the `Company` role name (54), dropping or changing `sub` fallback and identity
-precedence (56/58/59), admitting an unauthenticated organizer (64), rejecting the
-valid -840-minute boundary (79), rejecting the exact current instant (88), hiding
-an event exactly at its start rather than after it (97), and adding instead of
-subtracting the stored UTC offset or always using the legacy offset (107/108).
-The previously uncovered validation-error return (91) is now exercised by a
-date/offset combination whose UTC conversion would underflow.
-
-Local validation uses the installed .NET 8 runtime and the pinned Stryker tool.
-The selected local SDK is 10.0.401 and emits the previously documented nonfatal
-Razor-analyzer warning. Mutation commands ran outside the sandbox through the
-approval mechanism to avoid the Windows generated-assembly block. CI installs
-.NET 8 and uses Linux; that GitHub execution remains unverified until dispatch.
-
-#### Auth and Ticket setup
-
-Auth's original placeholder test passed before it was replaced. The new production
-reference and 10 unit-test cases exercise JWT signing and validation with explicit
-test credentials, the existing fallback configuration, claims, optional company
-details, unique token IDs, and eight-hour expiry. Auth production code is unchanged.
-
-Ticket previously had no test project. Its existing service built successfully
-before edits. `BookingConfirmedConsumer` was moved unchanged from `Program.cs`
-into `Services/BookingConfirmedConsumer.cs` to provide a stable mutation scope.
-`InternalsVisibleTo` allows the new test assembly to exercise the internal worker;
-no runtime behavior or target framework was changed. The four unit-test cases
-cover missing/empty/whitespace Kafka configuration and cancellation before the
-configured loop starts. The new test project is registered in `ExvoPlatform.sln`.
-The weather scaffold and application startup are excluded from the mutation scope.
-
-From the backend root:
-
-```powershell
-dotnet tool restore
-dotnet test tests/AuthService.Tests/Exvo.AuthService.Tests.csproj --configuration Release
-dotnet test tests/TicketService.Tests/Exvo.TicketService.Tests.csproj --configuration Release
-cd tests/AuthService.Tests
-dotnet stryker --config-file stryker-config.json --log-to-file
-cd ../TicketService.Tests
-dotnet stryker --config-file stryker-config.json --log-to-file
-dotnet build Exvo.TicketService.Tests.csproj --configuration Release --no-restore -t:Rebuild
-```
-
-Neither suite requires MySQL or Kafka. The cancellation test uses an already
-cancelled token and does not start a broker connection. Both configurations use
-`perTest` coverage, two workers, a 10-second additional timeout, and the existing
-80/60/0 thresholds. A low score remains informational, while build/test errors
-and an all-timeout report still fail validation.
-
-The manual workflow now uploads separate `auth-mutation-<run-id>` and
-`ticket-mutation-<run-id>` artifacts alongside Booking and Catalog. After mutation
-it rebuilds normal test assemblies even on failure: one local Ticket run briefly
-left a mutated output DLL in place because a test host held a file lock. Rebuilding
-resolved that lock and restored the normal assembly without changing the report.
-This cleanup step does not rerun mutation testing or overwrite saved reports.
-
-#### Auth and Ticket local results
-
-| Service / selected scope | Score | Killed | Survived | NoCoverage | Timeout | Unit tests |
-| --- | --- | --- | --- | --- | --- | --- |
-| Auth JWT TokenService | 100.00% | 35 | 0 | 0 | 0 | 10 passed |
-| Ticket BookingConfirmedConsumer | 25.93% | 7 | 0 | 20 | 0 | 4 passed |
-
-The final separate HTML reports are:
-
-- Auth: `tests/AuthService.Tests/StrykerOutput/2026-10-12.10-38-52/reports/mutation-report.html`.
-- Ticket: `tests/TicketService.Tests/StrykerOutput/2026-10-12.10-39-05/reports/mutation-report.html`.
-
-Auth's final run took approximately 1 minute 36 seconds; Ticket's took 1 minute
-15 seconds. The selected scopes contain 4 and 8 automatically ignored redundant
-block mutants respectively. No production behavior was changed to raise either
-score. These are local results, not dispatched GitHub Actions runs.
-
-Auth's first run had one survivor (321, `TokenServices.cs:33`) that changed the
-explicit `role` claim name to an empty string. Standard role validation still
-passed because the other role claim remained. The added assertion that generated
-claim names are nonempty detects that malformed output; the final run kills it.
-Other tests detect changed signing/configuration keys, issuer/audience values,
-identity and optional-claim names, and the expiry calculation. Registration,
-login/password verification, and profile endpoints are outside this JWT scope.
-
-Ticket has **no executed survivors**, but **20 uncovered mutants** in the Kafka
-processing path. This low score is a coverage gap, not a failed mutation run or
-an all-timeout result. Representative uncovered changes include removing consumer
-configuration (36), enabling auto-commit (38), removing topic subscription (39/40),
-dropping explicit commits for null or valid records (50/54), removing cancellation
-handling (56), and removing `Close()` (60). Detecting them needs broker-backed
-integration tests or a separately designed injectable consumer factory: verify the
-configured group/topic and manual commit policy, publish valid/null/malformed
-messages, inspect committed offsets and continued processing, then verify graceful
-cancellation and group shutdown. Those tests are not implemented in this unit-only
-setup. There is currently no ticket-issuance implementation to test.
-
-Both final commands completed with no timeouts, and normal assemblies were rebuilt
-and retested afterward. Formatting checks, solution registration, workflow
-YAML/matrix checks, and the workflow's JSON report-validation commands were also
-run locally. Booking/Catalog configurations and saved reports remain preserved;
-CheckIn is not in the mutation matrix and its files are unchanged.
+The dedicated **BookingService Mutation Testing** workflow is
+`.github/workflows/booking-mutation.yml`. It runs on pushes to
+`testing/mutation-testing`, pull requests targeting `develop`, and manual
+`workflow_dispatch`. To view a GitHub result, open **Actions**, select that
+workflow and a run, then download the `booking-mutation-<run-id>` artifact for
+HTML/JSON reports and logs. No GitHub Actions run has been verified from this
+local checkout; the results above are local only.
 
 ## Configuration and Security
 
@@ -694,4 +442,3 @@ targeting develop/main. It uploads TRX test results as artifacts.
 These unit tests verify client mapping and error propagation using
 controlled responses. They do not verify communication with the real
 CatalogService or the complete booking workflow.
-

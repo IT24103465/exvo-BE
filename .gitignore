@@ -19,6 +19,7 @@ TestResults/
 coverage/
 .coverage
 .coverage.*
+**/StrykerOutput/
 
 # NuGet and package caches
 *.nupkg
