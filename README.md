@@ -695,3 +695,27 @@ These unit tests verify client mapping and error propagation using
 controlled responses. They do not verify communication with the real
 CatalogService or the complete booking workflow.
 
+### Additional contribution — CheckInService
+
+Owner: Dasun
+
+Added five parameterized unit test cases for
+EventAnalyticsService.ResolveVenueCapacity:
+
+- Sum ticket-tier quantities.
+- Fall back to available tickets when tiers are missing.
+- Ensure capacity is at least the number of sold tickets.
+- Handle zero capacity and zero sales.
+- Fall back safely when ticket-tier JSON is invalid.
+
+This method has no external dependencies, so these tests need no mocks.
+
+Run:
+```bash
+dotnet test tests/CheckInService.Tests/Exvo.CheckInService.Tests.csproj --filter FullyQualifiedName~VenueCapacityUnitTests
+```
+
+Total new individual test cases: 12
+- BookingService: 7
+- CheckInService: 5
+
