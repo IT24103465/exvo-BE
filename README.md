@@ -652,3 +652,46 @@ ExvoPlatform.sln               Solution file
 .env.example                  Safe template for ignored .env.local
 ```
 
+## SE3112 — Unit Testing & Test Doubles
+
+Owner: Dasun — IT24103461
+
+### Tools and setup
+- .NET 8 SDK
+- xUnit
+- Custom HTTP stubs implementing IHttpClientFactory and HttpMessageHandler
+- Run commands from the repository root.
+- dotnet test automatically restores the required NuGet packages.
+
+### Individual contribution
+Added seven unit test cases for BookingService's
+EventInventoryCatalogClient:
+
+- Four parameterized ticket-quantity cases: null, zero, one and ten.
+- Two parameterized server-error cases: HTTP 500 and 503.
+- One missing-event case: HTTP 404 returns null.
+
+The tests call the production client directly and replace its HTTP
+dependency with controlled stub responses. These seven tests do not
+require a running CatalogService, database or Azure deployment.
+
+### Run my seven tests
+```bash
+dotnet test tests/BookingService.Tests/Exvo.BookingService.Tests.csproj --filter "FullyQualifiedName~TicketQuantityUnitTests|FullyQualifiedName~CatalogErrorUnitTests"
+```
+
+### Run all BookingService tests
+```bash
+dotnet test tests/BookingService.Tests/Exvo.BookingService.Tests.csproj
+```
+
+### Automation
+The existing backend-ci.yml workflow discovers test projects under
+tests/ and runs them on pushes to develop/main and pull requests
+targeting develop/main. It uploads TRX test results as artifacts.
+
+### Scope
+These unit tests verify client mapping and error propagation using
+controlled responses. They do not verify communication with the real
+CatalogService or the complete booking workflow.
+
