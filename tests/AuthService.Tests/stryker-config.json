@@ -1,0 +1,26 @@
+{
+  "stryker-config": {
+    "project": "ExvoAuthService.csproj",
+    "configuration": "Release",
+    "target-framework": "net8.0",
+    "concurrency": 2,
+    "additional-timeout": 10000,
+    "mutate": [
+      "**/Services/TokenServices.cs"
+    ],
+    "coverage-analysis": "perTest",
+    "test-case-filter": "FullyQualifiedName~TokenServiceTests",
+    "thresholds": {
+      "high": 90,
+      "low": 80,
+      "break": 80
+    },
+    "reporters": [
+      "Progress",
+      "Html",
+      "Json"
+    ],
+    "report-file-name": "mutation-report",
+    "break-on-initial-test-failure": true
+  }
+}
