@@ -29,12 +29,16 @@ breached:
 
 | Profile | Maximum errors | Global p95 |
 | --- | ---: | ---: |
-| `smoke` | 2% | 1200 ms |
+| `smoke` | 2% | 5000 ms |
 | `demo` / `load` | 1% | 1000 ms |
 | `stress` | 3% | 1800 ms |
 
-Catalog/event p95 must also remain below 800 ms, Booking availability below
-1200 ms, and optional login below 1500 ms.
+Smoke uses deployment-oriented endpoint ceilings: Catalog events 5000 ms,
+categories 3000 ms, event details 4000 ms, Booking availability 4000 ms, and
+optional login 5000 ms. This small profile can include Azure cold-start and
+network latency. Demo, load, and stress retain the stricter endpoint objectives:
+800 ms for Catalog/event requests, 1200 ms for Booking availability, and 1500 ms
+for optional login.
 
 ## Install and run
 

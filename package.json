@@ -9,6 +9,7 @@
     "test": "dotnet test ExvoPlatform.sln",
     "check": "npm run build && npm run test",
     "load:validate": "node tests/load/run-jmeter.mjs --validate",
+    "load:gate:test": "node --test tests/load/assert-jmeter-results.test.mjs",
     "load:gui": "node tests/load/run-jmeter.mjs --gui",
     "load:smoke": "node tests/load/run-jmeter.mjs --profile smoke",
     "load:demo": "node tests/load/run-jmeter.mjs --profile demo",

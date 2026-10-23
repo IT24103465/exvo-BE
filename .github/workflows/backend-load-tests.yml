@@ -81,6 +81,8 @@ jobs:
       - name: Add JMeter to PATH
         shell: bash
         run: echo "$HOME/.cache/apache-jmeter-$JMETER_VERSION/apache-jmeter-$JMETER_VERSION/bin" >> "$GITHUB_PATH"
+      - name: Test performance gate
+        run: npm run load:gate:test
       - name: Load JMX in CLI mode without traffic
         run: node tests/load/run-jmeter.mjs --validate
 
