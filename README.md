@@ -286,11 +286,12 @@ lookup is case-insensitive, and a missing-property default `JsonElement` has the
 same downstream result. Keep them visible and reassess if the parsing contract
 changes; do not treat every survivor as a defect.
 
-The dedicated **BookingService Mutation Testing** workflow is
-`.github/workflows/booking-mutation.yml`. It runs on pushes to
-`testing/mutation-testing`, pull requests targeting `develop`, and manual
-`workflow_dispatch`. To view a GitHub result, open **Actions**, select that
-workflow and a run, then download the `booking-mutation-<run-id>` artifact for
+The **BookingService mutation tests** job is part of **Backend CI and Release
+Validation** in `.github/workflows/backend-ci.yml`. It runs on pushes to
+`develop` and `main`, pull requests targeting either branch, and manual
+`workflow_dispatch`. The release gate requires this job to pass. To view a GitHub
+result, open **Actions**, select that workflow and a run, then download the
+`booking-mutation-<run-id>` artifact for
 HTML/JSON reports and logs. No GitHub Actions run has been verified from this
 local checkout; the results above are local only.
 

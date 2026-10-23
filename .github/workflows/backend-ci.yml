@@ -130,6 +130,45 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  booking-mutation:
+    name: BookingService mutation tests
+    needs: dependency-restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8 SDK and runtime
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore local tools
+        run: dotnet tool restore
+
+      - name: Restore BookingService test dependencies
+        run: dotnet restore tests/BookingService.Tests/Exvo.BookingService.Tests.csproj
+
+      - name: Run BookingService tests
+        run: dotnet test tests/BookingService.Tests/Exvo.BookingService.Tests.csproj --configuration Release --no-restore --logger "console;verbosity=minimal"
+
+      - name: Run Stryker.NET
+        working-directory: tests/BookingService.Tests
+        run: dotnet stryker --config-file stryker-config.json --log-to-file
+
+      - name: Upload mutation reports and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: booking-mutation-${{ github.run_id }}
+          path: |
+            tests/BookingService.Tests/StrykerOutput/**/reports/mutation-report.html
+            tests/BookingService.Tests/StrykerOutput/**/reports/mutation-report.json
+            tests/BookingService.Tests/StrykerOutput/**/logs/**
+          if-no-files-found: warn
+          retention-days: 14
+
   docker-validation:
     name: Docker Validation
     runs-on: ubuntu-latest
@@ -331,6 +370,7 @@ jobs:
       - solution-build
       - code-formatting
       - unit-tests
+      - booking-mutation
       - docker-validation
       - code-coverage
       - dependency-vulnerability-scan
@@ -344,6 +384,6 @@ jobs:
     steps:
       - name: Confirm all validation checks passed
         run: |
-          echo 'All nine backend validation checks passed.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'All ten backend validation checks passed.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Deployment is intentionally not configured: no target platform or credentials were specified.' >> "$GITHUB_STEP_SUMMARY"
       # TODO: connect the approved deployment job here after its platform and credentials are specified.
