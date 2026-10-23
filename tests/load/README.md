@@ -3,6 +3,10 @@
 Owner: IT24103465  
 Tool: Apache JMeter 5.6.3
 
+For complete setup instructions, theory, report interpretation, likely questions,
+model answers, troubleshooting, and a timed demo script, read
+[`JMETER_VIVA_GUIDE.md`](JMETER_VIVA_GUIDE.md).
+
 The JMeter test plan sends read-only traffic through the API gateway and measures
 the Gateway, Catalog, Booking, and optionally Auth services. A one-user setup
 thread first checks gateway health and discovers a valid event. The main thread
