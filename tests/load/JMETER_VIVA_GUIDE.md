@@ -182,8 +182,13 @@ npm.cmd run load:smoke
 - 5-second ramp-up.
 - 35-second duration.
 - Maximum 2% errors.
-- Global p95 must be at most 1200 ms.
+- Global p95 must be at most 5000 ms.
 - Purpose: confirm connectivity, data, assertions, reports, and gates.
+
+Smoke uses Azure-tolerant ceilings because its very small sample set may include
+Container Apps cold starts and cross-region runner latency. It remains strict on
+HTTP correctness, required endpoint coverage, and error rate. Do not present its
+latency ceiling as the expected-load service objective.
 
 Run this first on presentation day.
 
@@ -372,15 +377,21 @@ the main workload.
 
 ## 9. Performance gates
 
-The runner evaluates these endpoint p95 limits for every profile:
+The runner evaluates profile-specific endpoint p95 limits:
 
-| Endpoint | Maximum p95 |
-| --- | ---: |
-| Catalog events | 800 ms |
-| Catalog categories | 800 ms |
-| Event details | 800 ms |
-| Booking availability | 1200 ms |
-| Optional login | 1500 ms |
+| Endpoint | Smoke p95 | Demo/load/stress p95 |
+| --- | ---: | ---: |
+| Catalog events | 5000 ms | 800 ms |
+| Catalog categories | 3000 ms | 800 ms |
+| Event details | 4000 ms | 800 ms |
+| Booking availability | 4000 ms | 1200 ms |
+| Optional login | 5000 ms | 1500 ms |
+
+The smoke limits are deployment-oriented safety ceilings established from the
+Azure-hosted gateway baseline. They accommodate cold-start and network effects in
+a tiny sample set. The higher-concurrency profiles preserve the stricter service
+objectives used for meaningful performance evaluation. Thresholds are never a
+substitute for showing the measured values in the report.
 
 The gate also verifies:
 

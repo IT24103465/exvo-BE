@@ -6,11 +6,30 @@ if (!resultsPath || !summaryPath) {
   process.exit(2);
 }
 
+const strictEndpointLimits = {
+  'GET /api/catalog/events': 800,
+  'GET /api/catalog/categories': 800,
+  'GET /api/catalog/events/:id': 800,
+  'GET /api/booking/events/:id/availability': 1200,
+  'POST /api/auth/login': 1500,
+};
+
+// Smoke verifies deployment health with very few samples and may include Azure
+// Container Apps cold-start/network latency. Higher-concurrency profiles retain
+// the stricter service objectives below.
+const smokeEndpointLimits = {
+  'GET /api/catalog/events': 5000,
+  'GET /api/catalog/categories': 3000,
+  'GET /api/catalog/events/:id': 4000,
+  'GET /api/booking/events/:id/availability': 4000,
+  'POST /api/auth/login': 5000,
+};
+
 const limits = {
-  smoke: { errorRate: 0.02, globalP95: 1200 },
-  demo: { errorRate: 0.01, globalP95: 1000 },
-  load: { errorRate: 0.01, globalP95: 1000 },
-  stress: { errorRate: 0.03, globalP95: 1800 },
+  smoke: { errorRate: 0.02, globalP95: 5000, endpoints: smokeEndpointLimits },
+  demo: { errorRate: 0.01, globalP95: 1000, endpoints: strictEndpointLimits },
+  load: { errorRate: 0.01, globalP95: 1000, endpoints: strictEndpointLimits },
+  stress: { errorRate: 0.03, globalP95: 1800, endpoints: strictEndpointLimits },
 };
 if (!limits[profile]) throw new Error(`Unknown profile '${profile}'.`);
 
@@ -62,13 +81,7 @@ const samples = lines.slice(1).map(parseCsvLine).map((columns) => ({
 
 if (samples.length === 0) throw new Error('JMeter produced no main workload samples.');
 
-const endpointLimits = {
-  'GET /api/catalog/events': 800,
-  'GET /api/catalog/categories': 800,
-  'GET /api/catalog/events/:id': 800,
-  'GET /api/booking/events/:id/availability': 1200,
-  'POST /api/auth/login': 1500,
-};
+const endpointLimits = limits[profile].endpoints;
 const requiredEndpoints = new Set([
   'GET /api/catalog/events',
   'GET /api/catalog/categories',
