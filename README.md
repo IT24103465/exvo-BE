@@ -248,14 +248,30 @@ Catalog service is needed. See the [Stryker 4.x to 5.x migration guide](https://
 for runtime requirements and the [Stryker configuration reference](https://stryker-mutator.io/docs/stryker-net/configuration/)
 for option syntax.
 
-Mutation scope is deliberately limited to
-`src/services/BookingService/Services/EventInventoryCatalogClient.cs`. Its direct
+Each service has a `tests/<Service>.Tests/stryker-config.json` with a focused
+mutation scope and an **80%** break threshold (high: 90%, low: 80%):
+
+| Service | Production code mutated | Focused tests |
+| --- | --- | --- |
+| BookingService | `Services/EventInventoryCatalogClient.cs` | Inventory mappings, quantities, and Catalog HTTP errors |
+| AuthService | `Services/TokenServices.cs` | Signed JWT identity, roles, optional claims, defaults, expiry, and unique IDs |
+| CatalogService | `EventAccess.cs`, `EventSchedule.cs` | Organizer access, schedule validation, UTC offsets, expiry boundaries, and hiding expired events |
+| CheckInService | `Services/CsvReportGenerator.cs` | Sales and attendance report values, headers, CSV escaping, BOM, rounding, and empty data |
+| TicketService | `BookingConfirmedConsumer.cs` | Broker configuration, topic subscription, message handling, commits, cancellation, and cleanup |
+
+TicketService currently consumes and logs booking notifications; it does not yet
+issue tickets. Its worker was moved out of `Program.cs` and accepts an optional
+consumer factory so tests can use a mock Kafka consumer. The default factory
+still builds the real Kafka consumer. Mutation tests need no external services.
+Startup, API infrastructure, migrations, generated code, and the weather sample
+are outside these scopes. These are focused checks, not whole-service coverage.
+
+BookingService's direct
 contract tests cover ticket quantities, tier values and aliases, general-admission
 fallback, Catalog HTTP errors, and event snapshots. Stryker filters to
 `EventInventoryCatalogClientTests`, `TicketQuantityUnitTests`, and
-`CatalogErrorUnitTests`; the full BookingService test project is run first. Startup,
-API infrastructure, migrations, generated code, and unrelated services are not in
-the mutation scope.
+`CatalogErrorUnitTests`. CI runs each service's full test project before Stryker;
+Stryker then uses that service's focused test filter.
 
 Run from the repository root in PowerShell:
 
@@ -267,13 +283,32 @@ Set-Location tests\BookingService.Tests
 dotnet stryker --config-file stryker-config.json --log-to-file
 ```
 
+For another service, replace `BookingService` with `AuthService`, `CatalogService`,
+`CheckInService`, or `TicketService` in the commands above. To run all five from
+the repository root:
+
+```powershell
+dotnet tool restore
+dotnet restore ExvoPlatform.sln
+foreach ($service in 'AuthService', 'BookingService', 'CatalogService', 'CheckInService', 'TicketService') {
+    $project = "tests/$service.Tests/Exvo.$service.Tests.csproj"
+    dotnet test $project --configuration Release --no-restore
+    if ($LASTEXITCODE -ne 0) { throw "$service tests failed" }
+    Push-Location "tests/$service.Tests"
+    try {
+        dotnet stryker --config-file stryker-config.json --log-to-file
+        if ($LASTEXITCODE -ne 0) { throw "$service mutation testing failed" }
+    } finally { Pop-Location }
+}
+```
+
 Stryker writes HTML and JSON reports to
-`tests/BookingService.Tests/StrykerOutput/<run-timestamp>/reports/` and diagnostic
+`tests/<Service>.Tests/StrykerOutput/<run-timestamp>/reports/` and diagnostic
 logs to the sibling `logs/` directory. Open `mutation-report.html` to inspect
 individual mutations and the tests that killed them. Generated output is ignored
 by Git; the manifest and `stryker-config.json` are tracked.
 
-The configured break threshold is **80%** (high: 90%, low: 80%). The first fresh
+For BookingService, the first fresh
 run against the original 27-test suite scored 23.26% (20 killed, 26 survived, 40
 uncovered). Tests were added for missing observable mappings and edge cases; the
 final local run scored 83.72% (72 killed, 14 survived, 0 uncovered, 0 timeouts).
@@ -286,12 +321,30 @@ lookup is case-insensitive, and a missing-property default `JsonElement` has the
 same downstream result. Keep them visible and reassess if the parsing contract
 changes; do not treat every survivor as a defect.
 
-The **BookingService mutation tests** job is part of **Backend CI and Release
+The additional focused scopes were measured locally on 23 October 2026:
+
+| Service | Killed | Survived | Mutation score |
+| --- | ---: | ---: | ---: |
+| AuthService | 35 | 0 | 100.00% |
+| CatalogService | 43 | 1 | 97.73% |
+| CheckInService | 114 | 6 | 95.00% |
+| TicketService | 27 | 3 | 90.00% |
+
+These runs had no timeouts, runtime errors, or uncovered in-scope mutants.
+Ignored and noncompiling mutants are excluded from the score. Surviving mutants
+remain visible in the reports: Catalog includes the redundant early return when
+no expired events exist; CheckIn includes report separators and the empty-list
+loop condition; Ticket includes the real Kafka factory branch and loop control.
+The mocked Ticket tests do not verify connectivity to a real Kafka broker.
+
+The **mutation-tests** matrix is part of **Backend CI and Release
 Validation** in `.github/workflows/backend-ci.yml`. It runs on pushes to
 `develop` and `main`, pull requests targeting either branch, and manual
-`workflow_dispatch`. The release gate requires this job to pass. To view a GitHub
+`workflow_dispatch`. All five services run independently (`fail-fast: false`),
+so one failure does not cancel the other reports. The release gate requires the
+entire matrix to pass. To view a GitHub
 result, open **Actions**, select that workflow and a run, then download the
-`booking-mutation-<run-id>` artifact for
+`<service>-mutation-<run-id>` artifact (`auth`, `booking`, `catalog`, `checkin`, or `ticket`) for
 HTML/JSON reports and logs. No GitHub Actions run has been verified from this
 local checkout; the results above are local only.
 

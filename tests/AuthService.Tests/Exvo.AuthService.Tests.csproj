@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <ProjectReference Include="../../src/services/AuthService/ExvoAuthService.csproj" />
   </ItemGroup>
 
 </Project>

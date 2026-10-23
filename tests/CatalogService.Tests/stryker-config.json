@@ -1,0 +1,27 @@
+{
+  "stryker-config": {
+    "project": "Exvo.CatalogService.csproj",
+    "configuration": "Release",
+    "target-framework": "net8.0",
+    "concurrency": 2,
+    "additional-timeout": 10000,
+    "mutate": [
+      "**/EventAccess.cs",
+      "**/EventSchedule.cs"
+    ],
+    "coverage-analysis": "perTest",
+    "test-case-filter": "FullyQualifiedName~CatalogRulesTests",
+    "thresholds": {
+      "high": 90,
+      "low": 80,
+      "break": 80
+    },
+    "reporters": [
+      "Progress",
+      "Html",
+      "Json"
+    ],
+    "report-file-name": "mutation-report",
+    "break-on-initial-test-failure": true
+  }
+}

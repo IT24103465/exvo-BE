@@ -130,11 +130,30 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  booking-mutation:
-    name: BookingService mutation tests
+  mutation-tests:
+    name: ${{ matrix.service }} mutation tests
     needs: dependency-restore
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: BookingService
+            project: Exvo.BookingService.Tests.csproj
+            artifact: booking
+          - service: AuthService
+            project: Exvo.AuthService.Tests.csproj
+            artifact: auth
+          - service: CatalogService
+            project: Exvo.CatalogService.Tests.csproj
+            artifact: catalog
+          - service: CheckInService
+            project: Exvo.CheckInService.Tests.csproj
+            artifact: checkin
+          - service: TicketService
+            project: Exvo.TicketService.Tests.csproj
+            artifact: ticket
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -147,25 +166,25 @@ jobs:
       - name: Restore local tools
         run: dotnet tool restore
 
-      - name: Restore BookingService test dependencies
-        run: dotnet restore tests/BookingService.Tests/Exvo.BookingService.Tests.csproj
+      - name: Restore service test dependencies
+        run: dotnet restore "tests/${{ matrix.service }}.Tests/${{ matrix.project }}"
 
-      - name: Run BookingService tests
-        run: dotnet test tests/BookingService.Tests/Exvo.BookingService.Tests.csproj --configuration Release --no-restore --logger "console;verbosity=minimal"
+      - name: Run service tests
+        run: dotnet test "tests/${{ matrix.service }}.Tests/${{ matrix.project }}" --configuration Release --no-restore --logger "console;verbosity=minimal"
 
       - name: Run Stryker.NET
-        working-directory: tests/BookingService.Tests
+        working-directory: tests/${{ matrix.service }}.Tests
         run: dotnet stryker --config-file stryker-config.json --log-to-file
 
       - name: Upload mutation reports and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: booking-mutation-${{ github.run_id }}
+          name: ${{ matrix.artifact }}-mutation-${{ github.run_id }}
           path: |
-            tests/BookingService.Tests/StrykerOutput/**/reports/mutation-report.html
-            tests/BookingService.Tests/StrykerOutput/**/reports/mutation-report.json
-            tests/BookingService.Tests/StrykerOutput/**/logs/**
+            tests/${{ matrix.service }}.Tests/StrykerOutput/**/reports/mutation-report.html
+            tests/${{ matrix.service }}.Tests/StrykerOutput/**/reports/mutation-report.json
+            tests/${{ matrix.service }}.Tests/StrykerOutput/**/logs/**
           if-no-files-found: warn
           retention-days: 14
 
@@ -370,7 +389,7 @@ jobs:
       - solution-build
       - code-formatting
       - unit-tests
-      - booking-mutation
+      - mutation-tests
       - docker-validation
       - code-coverage
       - dependency-vulnerability-scan
