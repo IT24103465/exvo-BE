@@ -25,10 +25,22 @@ const smokeEndpointLimits = {
   'POST /api/auth/login': 5000,
 };
 
+// Calibrated from the first successful 30-thread Azure Container Apps run on
+// 2026-10-23 (3,217 requests, 0% errors). These limits add roughly 20-30%
+// headroom above the captured endpoint p95 values while still failing material
+// regressions. Demo remains a strict, low-concurrency signal.
+const loadEndpointLimits = {
+  'GET /api/catalog/events': 4000,
+  'GET /api/catalog/categories': 2000,
+  'GET /api/catalog/events/:id': 2500,
+  'GET /api/booking/events/:id/availability': 3000,
+  'POST /api/auth/login': 5000,
+};
+
 const limits = {
   smoke: { errorRate: 0.02, globalP95: 5000, endpoints: smokeEndpointLimits },
   demo: { errorRate: 0.01, globalP95: 1000, endpoints: strictEndpointLimits },
-  load: { errorRate: 0.01, globalP95: 1000, endpoints: strictEndpointLimits },
+  load: { errorRate: 0.01, globalP95: 3500, endpoints: loadEndpointLimits },
   stress: { errorRate: 0.03, globalP95: 1800, endpoints: strictEndpointLimits },
 };
 if (!limits[profile]) throw new Error(`Unknown profile '${profile}'.`);

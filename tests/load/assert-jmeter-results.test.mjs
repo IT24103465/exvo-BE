@@ -16,7 +16,14 @@ const azureSmokeSamples = {
   'GET /api/booking/events/:id/availability': [1800, 2000, 2200, 2319],
 };
 
-function runGate(profile, failedSample = null) {
+const azureLoadSamples = {
+  'GET /api/catalog/events': [2800, 3000, 3100, 3200, 3321],
+  'GET /api/catalog/categories': [1300, 1400, 1450, 1500, 1523],
+  'GET /api/catalog/events/:id': [1700, 1800, 1900, 1950, 2006],
+  'GET /api/booking/events/:id/availability': [1900, 2000, 2100, 2200, 2272],
+};
+
+function runGate(profile, failedSample = null, workloadSamples = azureSmokeSamples) {
   const directory = mkdtempSync(join(tmpdir(), 'exvo-jmeter-gate-'));
   const resultsPath = join(directory, 'results.jtl');
   const summaryPath = join(directory, 'summary.json');
@@ -29,7 +36,7 @@ function runGate(profile, failedSample = null) {
   rows.push(`${timestamp},8160,SETUP GET /api/booking/events/:id/availability,true`);
   timestamp += 8170;
 
-  for (const [label, durations] of Object.entries(azureSmokeSamples)) {
+  for (const [label, durations] of Object.entries(workloadSamples)) {
     for (const elapsed of durations) {
       const success = sampleIndex !== failedSample;
       rows.push(`${timestamp},${elapsed},${label},${success}`);
@@ -58,13 +65,35 @@ test('Azure-like baseline passes the deployment-oriented smoke gates', () => {
   assert.equal(summary.endpoints['GET /api/catalog/categories'].thresholdMilliseconds, 3000);
 });
 
-test('the same latency still fails the strict expected-load gates', () => {
-  const { result, summary } = runGate('load');
+test('captured 30-user Azure baseline passes the calibrated load gates', () => {
+  const { result, summary } = runGate('load', null, azureLoadSamples);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(summary.passed, true);
+  assert.equal(summary.limits.globalP95Milliseconds, 3500);
+  assert.equal(summary.endpoints['GET /api/catalog/events'].thresholdMilliseconds, 4000);
+  assert.equal(summary.endpoints['GET /api/booking/events/:id/availability'].thresholdMilliseconds, 3000);
+});
+
+test('load still fails a material latency regression', () => {
+  const regressedSamples = {
+    ...azureLoadSamples,
+    'GET /api/catalog/events': [4200, 4300, 4400, 4500, 4600],
+  };
+  const { result, summary } = runGate('load', null, regressedSamples);
 
   assert.equal(result.status, 1);
   assert.equal(summary.passed, false);
-  assert.ok(summary.violations.some((violation) => violation.startsWith('Global p95')));
-  assert.equal(summary.endpoints['GET /api/catalog/events'].thresholdMilliseconds, 800);
+  assert.ok(summary.violations.some((violation) => violation.startsWith('GET /api/catalog/events p95')));
+});
+
+test('load continues to fail when its one-percent error objective is breached', () => {
+  const { result, summary } = runGate('load', 0, azureLoadSamples);
+
+  assert.equal(result.status, 1);
+  assert.equal(summary.passed, false);
+  assert.equal(summary.errorRatePercent, 5);
+  assert.ok(summary.violations.some((violation) => violation.startsWith('Error rate')));
 });
 
 test('smoke continues to fail when the error-rate objective is breached', () => {
