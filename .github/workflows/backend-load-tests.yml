@@ -1,0 +1,160 @@
+name: Backend Load Testing
+
+on:
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - 'tests/load/**'
+      - 'package.json'
+      - '.github/workflows/backend-load-tests.yml'
+  push:
+    branches: [develop, main]
+    paths:
+      - 'tests/load/**'
+      - 'package.json'
+      - '.github/workflows/backend-load-tests.yml'
+  schedule:
+    # Tuesday 00:00 Asia/Colombo (GitHub cron is UTC).
+    - cron: '30 18 * * 1'
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Traffic profile to execute
+        required: true
+        default: demo
+        type: choice
+        options: [smoke, demo, load, stress]
+      base_url:
+        description: Gateway URL (blank uses repository variable LOAD_TEST_BASE_URL)
+        required: false
+        type: string
+      event_id:
+        description: Optional existing event ID (blank enables discovery)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: load-tests-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  JMETER_VERSION: '5.6.3'
+
+jobs:
+  validate-test-plan:
+    name: Validate JMeter test plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Cache Apache JMeter
+        id: cache-jmeter
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/apache-jmeter-${{ env.JMETER_VERSION }}
+          key: jmeter-${{ runner.os }}-${{ env.JMETER_VERSION }}
+      - name: Download and verify Apache JMeter
+        if: steps.cache-jmeter.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache="$HOME/.cache/apache-jmeter-$JMETER_VERSION"
+          mkdir -p "$cache"
+          curl --fail --location --retry 3 \
+            --output "$cache/apache-jmeter-$JMETER_VERSION.tgz" \
+            "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-$JMETER_VERSION.tgz"
+          curl --fail --location --retry 3 \
+            --output "$cache/apache-jmeter-$JMETER_VERSION.tgz.sha512" \
+            "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-$JMETER_VERSION.tgz.sha512"
+          cd "$cache"
+          sha512sum --check "apache-jmeter-$JMETER_VERSION.tgz.sha512"
+          tar --extract --gzip --file "apache-jmeter-$JMETER_VERSION.tgz"
+      - name: Add JMeter to PATH
+        shell: bash
+        run: echo "$HOME/.cache/apache-jmeter-$JMETER_VERSION/apache-jmeter-$JMETER_VERSION/bin" >> "$GITHUB_PATH"
+      - name: Load JMX in CLI mode without traffic
+        run: node tests/load/run-jmeter.mjs --validate
+
+  execute-load-test:
+    name: Execute ${{ inputs.profile || 'load' }} profile
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    needs: validate-test-plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      INPUT_BASE_URL: ${{ inputs.base_url }}
+      CONFIGURED_BASE_URL: ${{ vars.LOAD_TEST_BASE_URL }}
+      PROFILE: ${{ inputs.profile || 'load' }}
+      EVENT_ID: ${{ inputs.event_id }}
+      LOAD_TEST_EMAIL: ${{ secrets.LOAD_TEST_EMAIL }}
+      LOAD_TEST_PASSWORD: ${{ secrets.LOAD_TEST_PASSWORD }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Restore Apache JMeter
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/apache-jmeter-${{ env.JMETER_VERSION }}
+          key: jmeter-${{ runner.os }}-${{ env.JMETER_VERSION }}
+          fail-on-cache-miss: true
+      - name: Add JMeter to PATH
+        shell: bash
+        run: echo "$HOME/.cache/apache-jmeter-$JMETER_VERSION/apache-jmeter-$JMETER_VERSION/bin" >> "$GITHUB_PATH"
+      - name: Resolve target URL
+        id: target
+        shell: bash
+        run: |
+          target="${INPUT_BASE_URL:-$CONFIGURED_BASE_URL}"
+          if [ -z "$target" ]; then
+            echo 'Set the LOAD_TEST_BASE_URL repository variable or provide base_url when dispatching.' >&2
+            exit 1
+          fi
+          if [[ "$target" != http://* && "$target" != https://* ]]; then
+            echo 'The load-test target must start with http:// or https://.' >&2
+            exit 1
+          fi
+          echo "base_url=$target" >> "$GITHUB_OUTPUT"
+      - name: Run JMeter and enforce performance gates
+        env:
+          BASE_URL: ${{ steps.target.outputs.base_url }}
+        run: node tests/load/run-jmeter.mjs --profile "$PROFILE"
+      - name: Publish run summary
+        if: always()
+        shell: bash
+        run: |
+          summary=$(find tests/load/results -type f -name summary.json -print | sort | tail -n 1)
+          if [ -z "$summary" ]; then
+            echo 'No JMeter summary was generated.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          jq -r '
+            "## JMeter performance result\n" +
+            "- Profile: " + .profile + "\n" +
+            "- Requests: " + (.requests | tostring) + "\n" +
+            "- Throughput: " + (.throughputPerSecond | tostring) + " requests/s\n" +
+            "- Global p95: " + (.p95Milliseconds | tostring) + " ms\n" +
+            "- Error rate: " + (.errorRatePercent | tostring) + "%\n" +
+            "- Result: " + (if .passed then "PASS" else "FAIL" end)
+          ' "$summary" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload JMeter reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jmeter-${{ env.PROFILE }}-${{ github.run_id }}
+          path: tests/load/results/**
+          if-no-files-found: warn
+          retention-days: 14
