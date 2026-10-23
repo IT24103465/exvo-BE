@@ -238,14 +238,14 @@ Test projects:
 
 The test projects use xUnit for automated verification.
 
-### Load and performance testing with k6
+### Load and performance testing with Apache JMeter
 
 Owner: IT24103465
 
-The k6 suite exercises the gateway, public Catalog reads, event details, Booking
+The JMeter suite exercises the gateway, public Catalog reads, event details, Booking
 availability, and optional Auth login with smoke, demo, load, and stress profiles.
 It enforces automated latency, error-rate, and functional-check thresholds and
-produces JSON plus interactive HTML reports.
+produces JTL, JSON summary, log, and interactive HTML dashboard artifacts.
 
 With the backend running locally:
 

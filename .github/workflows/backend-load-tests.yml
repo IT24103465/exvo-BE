@@ -40,28 +40,54 @@ concurrency:
   group: load-tests-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  JMETER_VERSION: '5.6.3'
+
 jobs:
-  validate-script:
-    name: Validate k6 script
+  validate-test-plan:
+    name: Validate JMeter test plan
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Set up k6
-        uses: grafana/setup-k6-action@v1
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
         with:
-          k6-version: '0.54.0'
-      - name: Inspect script and profiles
-        env:
-          BASE_URL: http://example.invalid
-          PROFILE: smoke
-        run: k6 inspect tests/load/exvo-load-test.js
+          distribution: temurin
+          java-version: '17'
+      - name: Cache Apache JMeter
+        id: cache-jmeter
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/apache-jmeter-${{ env.JMETER_VERSION }}
+          key: jmeter-${{ runner.os }}-${{ env.JMETER_VERSION }}
+      - name: Download and verify Apache JMeter
+        if: steps.cache-jmeter.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache="$HOME/.cache/apache-jmeter-$JMETER_VERSION"
+          mkdir -p "$cache"
+          curl --fail --location --retry 3 \
+            --output "$cache/apache-jmeter-$JMETER_VERSION.tgz" \
+            "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-$JMETER_VERSION.tgz"
+          curl --fail --location --retry 3 \
+            --output "$cache/apache-jmeter-$JMETER_VERSION.tgz.sha512" \
+            "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-$JMETER_VERSION.tgz.sha512"
+          cd "$cache"
+          sha512sum --check "apache-jmeter-$JMETER_VERSION.tgz.sha512"
+          tar --extract --gzip --file "apache-jmeter-$JMETER_VERSION.tgz"
+      - name: Add JMeter to PATH
+        shell: bash
+        run: echo "$HOME/.cache/apache-jmeter-$JMETER_VERSION/apache-jmeter-$JMETER_VERSION/bin" >> "$GITHUB_PATH"
+      - name: Load JMX in CLI mode without traffic
+        run: node tests/load/run-jmeter.mjs --validate
 
   execute-load-test:
     name: Execute ${{ inputs.profile || 'load' }} profile
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
-    needs: validate-script
+    needs: validate-test-plan
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -71,17 +97,23 @@ jobs:
       EVENT_ID: ${{ inputs.event_id }}
       LOAD_TEST_EMAIL: ${{ secrets.LOAD_TEST_EMAIL }}
       LOAD_TEST_PASSWORD: ${{ secrets.LOAD_TEST_PASSWORD }}
-      RESULTS_DIR: tests/load/results
-      K6_WEB_DASHBOARD: 'true'
-      K6_WEB_DASHBOARD_OPEN: 'false'
-      K6_WEB_DASHBOARD_EXPORT: tests/load/results/report.html
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Set up k6
-        uses: grafana/setup-k6-action@v1
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
         with:
-          k6-version: '0.54.0'
+          distribution: temurin
+          java-version: '17'
+      - name: Restore Apache JMeter
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/apache-jmeter-${{ env.JMETER_VERSION }}
+          key: jmeter-${{ runner.os }}-${{ env.JMETER_VERSION }}
+          fail-on-cache-miss: true
+      - name: Add JMeter to PATH
+        shell: bash
+        run: echo "$HOME/.cache/apache-jmeter-$JMETER_VERSION/apache-jmeter-$JMETER_VERSION/bin" >> "$GITHUB_PATH"
       - name: Resolve target URL
         id: target
         shell: bash
@@ -96,31 +128,33 @@ jobs:
             exit 1
           fi
           echo "base_url=$target" >> "$GITHUB_OUTPUT"
-      - name: Run k6 thresholds
+      - name: Run JMeter and enforce performance gates
         env:
           BASE_URL: ${{ steps.target.outputs.base_url }}
-        run: k6 run tests/load/exvo-load-test.js
+        run: node tests/load/run-jmeter.mjs --profile "$PROFILE"
       - name: Publish run summary
         if: always()
         shell: bash
         run: |
-          if [ ! -f tests/load/results/summary.json ]; then
-            echo 'No k6 summary was generated.' >> "$GITHUB_STEP_SUMMARY"
+          summary=$(find tests/load/results -type f -name summary.json -print | sort | tail -n 1)
+          if [ -z "$summary" ]; then
+            echo 'No JMeter summary was generated.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           jq -r '
-            "## k6 performance result\n" +
-            "- Requests: " + ((.metrics.http_reqs.values.count // 0) | tostring) + "\n" +
-            "- Throughput: " + ((.metrics.http_reqs.values.rate // 0) | tostring) + " requests/s\n" +
-            "- HTTP p95: " + ((.metrics.http_req_duration.values["p(95)"] // 0) | tostring) + " ms\n" +
-            "- Failure rate: " + (((.metrics.http_req_failed.values.rate // 0) * 100) | tostring) + "%\n" +
-            "- Check pass rate: " + (((.metrics.checks.values.rate // 0) * 100) | tostring) + "%"
-          ' tests/load/results/summary.json >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload k6 reports
+            "## JMeter performance result\n" +
+            "- Profile: " + .profile + "\n" +
+            "- Requests: " + (.requests | tostring) + "\n" +
+            "- Throughput: " + (.throughputPerSecond | tostring) + " requests/s\n" +
+            "- Global p95: " + (.p95Milliseconds | tostring) + " ms\n" +
+            "- Error rate: " + (.errorRatePercent | tostring) + "%\n" +
+            "- Result: " + (if .passed then "PASS" else "FAIL" end)
+          ' "$summary" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload JMeter reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: k6-${{ env.PROFILE }}-${{ github.run_id }}
+          name: jmeter-${{ env.PROFILE }}-${{ github.run_id }}
           path: tests/load/results/**
           if-no-files-found: warn
           retention-days: 14

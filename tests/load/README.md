@@ -1,31 +1,43 @@
 # Exvo load and performance testing
 
 Owner: IT24103465  
-Tool: Grafana k6
+Tool: Apache JMeter 5.6.3
 
-This suite sends read-only traffic through the API gateway and measures the
-Gateway, Catalog, Booking, and optionally Auth services. It discovers a valid
-event before the run, so event-detail and booking-availability traffic uses real
-application data. It never creates users, bookings, seat holds, or check-ins.
+The JMeter test plan sends read-only traffic through the API gateway and measures
+the Gateway, Catalog, Booking, and optionally Auth services. A one-user setup
+thread first checks gateway health and discovers a valid event. The main thread
+group then browses events/categories, reads that event, checks Booking availability,
+and optionally logs in. It never creates users, bookings, holds, or check-ins.
 
 ## Profiles
 
-| Profile | Shape | Intended use |
-| --- | --- | --- |
-| `smoke` | 1 virtual user, 35 seconds | Connectivity and script verification |
-| `demo` | Ramp to 10 users, 50 seconds | Fast, reliable live assessment demo |
-| `load` | Ramp to 30 users, 4.5 minutes | Expected sustained concurrency |
-| `stress` | Ramp to 100 users, 4 minutes | Find degradation/breaking behavior in non-production |
+| Profile | Threads | Ramp-up | Total duration | Intended use |
+| --- | ---: | ---: | ---: | --- |
+| `smoke` | 1 | 5 seconds | 35 seconds | Connectivity and plan verification |
+| `demo` | 10 | 10 seconds | 50 seconds | Fast live assessment demonstration |
+| `load` | 30 | 60 seconds | 270 seconds | Expected sustained concurrency |
+| `stress` | 100 | 180 seconds | 240 seconds | Find degradation in non-production |
 
-The test fails when its performance contract is breached. The normal load goal
-is under 1% failed requests/checks and p95 latency under 1 second globally, with
-tighter 800 ms p95 goals for core catalog/event reads. Booking availability has
-a 1.2 second p95 goal; optional login has a 1.5 second p95 goal. Stress limits are
-intentionally more tolerant because its purpose is to locate saturation.
+Each thread repeats the same user journey and pauses for a randomized 0.5–1.5
+seconds between journeys. HTTP response assertions require status 200. The
+post-run performance gate fails automation if the error rate or p95 limits are
+breached:
 
-## Run locally
+| Profile | Maximum errors | Global p95 |
+| --- | ---: | ---: |
+| `smoke` | 2% | 1200 ms |
+| `demo` / `load` | 1% | 1000 ms |
+| `stress` | 3% | 1800 ms |
 
-Install k6, start the backend, and run from the repository root:
+Catalog/event p95 must also remain below 800 ms, Booking availability below
+1200 ms, and optional login below 1500 ms.
+
+## Install and run
+
+Install Java 17 (Java 17–21 is supported by this plan) and Apache JMeter 5.6.3,
+then add JMeter's `bin` directory to `PATH` or set `JMETER_HOME`. Java 25 is not
+compatible with JMeter 5.6.3's bundled Groovy engine. Start the backend and run
+from the repository root:
 
 ```powershell
 $env:BASE_URL = 'http://localhost:5000'
@@ -33,8 +45,15 @@ npm run load:demo
 ```
 
 Other commands are `npm run load:smoke`, `npm run load:test`, and
-`npm run load:stress`. To include AuthService login performance, use a dedicated
-non-production account:
+`npm run load:stress`. Every run creates a timestamped directory under
+`tests/load/results/` containing:
+
+- `results.jtl`: raw sample-level results.
+- `jmeter.log`: engine diagnostics.
+- `summary.json`: automated threshold decision and endpoint statistics.
+- `report/index.html`: interactive native JMeter dashboard.
+
+Use a dedicated non-production account to include AuthService login performance:
 
 ```powershell
 $env:LOAD_TEST_EMAIL = 'load-test@example.com'
@@ -42,67 +61,53 @@ $env:LOAD_TEST_PASSWORD = '<non-production-password>'
 npm run load:demo
 ```
 
-To force a known catalog event instead of automatic discovery:
+Set `$env:EVENT_ID = '1'` to force an existing event instead of automatic
+discovery. Do not run `stress` against production or a shared environment without
+explicit team approval.
+
+## GUI demonstration
+
+Open the plan with:
 
 ```powershell
-$env:EVENT_ID = '1'
-npm run load:demo
+npm run load:gui
 ```
 
-Docker is an alternative when k6 is not installed:
+Use the tree to explain the setup thread, HTTP defaults, assertions, controllers,
+and main thread group. Edit and inspect plans in the GUI, but execute measured load
+with an npm command/CLI mode—the GUI consumes CPU and memory and can distort load
+results. After execution, open `report/index.html` and demonstrate:
 
-```powershell
-docker run --rm -i `
-  -e BASE_URL=http://host.docker.internal:5000 `
-  -e PROFILE=demo `
-  -e RESULTS_DIR=/work/tests/load/results `
-  -e K6_WEB_DASHBOARD=true `
-  -e K6_WEB_DASHBOARD_EXPORT=/work/tests/load/results/report.html `
-  -v "${PWD}:/work" -w /work grafana/k6:0.54.0 `
-  run tests/load/exvo-load-test.js
-```
+1. Dashboard summary and APDEX.
+2. Per-request statistics and p95/p99 response times.
+3. Active Threads Over Time, Hits per Second, and Transactions per Second.
+4. Error table and response-code graph.
+5. `summary.json` showing the automated PASS/FAIL decision.
 
-Do not run `stress` against production or a shared environment without explicit
-team approval. Load generation consumes real application and database capacity.
+## Automation
 
-## Automation and reports
+The `Backend Load Testing` workflow downloads and SHA-512 verifies Apache JMeter,
+loads the JMX without sending traffic on relevant pushes/pull requests, supports
+manual test execution, and schedules a weekly `load` profile. Active runs produce
+JTL/HTML/JSON artifacts even when a performance gate fails.
 
-The `Backend Load Testing` GitHub Actions workflow validates the script on
-relevant pushes and pull requests. It runs an actual test when manually
-dispatched, and runs the `load` profile weekly against the URL stored in the
-repository variable `LOAD_TEST_BASE_URL`.
-
-Configure these GitHub settings:
-
-- Variable `LOAD_TEST_BASE_URL`: deployed non-production gateway URL.
-- Secrets `LOAD_TEST_EMAIL` and `LOAD_TEST_PASSWORD`: optional test-account
-  credentials. If either is absent, login traffic is skipped.
-
-Each active workflow run uploads `summary.json` and an interactive `report.html`
-artifact, even when a threshold fails. A failed workflow therefore preserves the
-evidence needed to diagnose the regression.
-
-Read the output in this order during the demo:
-
-1. `http_reqs` and request rate show the traffic volume/throughput.
-2. `http_req_duration` p95 shows the experience of 95% of requests.
-3. `http_req_failed` and `endpoint_errors` show transport/status failures.
-4. `checks` confirms functional correctness under concurrency.
-5. Per-endpoint trends identify whether Catalog, Booking, or Auth is the bottleneck.
+Configure repository variable `LOAD_TEST_BASE_URL` with a deployed non-production
+gateway. Optional secrets `LOAD_TEST_EMAIL` and `LOAD_TEST_PASSWORD` enable login
+traffic. If either is absent, the login controller is skipped.
 
 ## Two-minute demo and VIVA notes
 
-Run `npm run load:demo`, point out the staged ramp from 5 to 10 concurrent virtual
-users, then explain the threshold result and p95. A virtual user repeatedly follows
-the scripted browsing journey; it is not the same as requests per second. Throughput
-depends on response time and the randomized think time.
+Run `npm run load:demo`, explain that ten threads represent ten concurrent users,
+and open the generated HTML report. Threads are not requests per second: actual
+throughput depends on response times, the four HTTP operations, and think time.
 
-- Load testing validates expected traffic; stress testing increases traffic until
-  service quality degrades.
-- p95 is more useful than an average because an average can hide slow outliers.
-- Thresholds turn performance objectives into automated pass/fail release signals.
-- Checks validate response correctness; a fast HTTP 500 is still a failed test.
-- Ramp-up avoids an unrealistic instant traffic wall and reveals the concurrency
-  level at which latency or errors begin increasing.
-- The test uses read-only endpoints so repeated CI/demo runs are deterministic and
-  do not corrupt booking inventory.
+- Load testing validates expected traffic; stress testing searches for saturation.
+- p95 means 95% of requests completed at or below that time and exposes slow-tail
+  behavior that an average can hide.
+- Assertions prove correctness under concurrency; a fast HTTP 500 is still a fail.
+- Ramp-up introduces users progressively and avoids an unrealistic instant wall.
+- APDEX summarizes satisfied/tolerating/frustrated response experiences, while raw
+  percentiles and errors provide the evidence behind that score.
+- GUI listeners are useful for debugging small runs but expensive during real load;
+  CLI execution plus the post-run HTML dashboard produces more trustworthy results.
+- Read-only endpoints make repeated CI/demo runs safer and deterministic.

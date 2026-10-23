@@ -21,6 +21,8 @@ coverage/
 .coverage.*
 tests/load/results/*
 !tests/load/results/.gitkeep
+jmeter.log
+*.jtl
 
 # NuGet and package caches
 *.nupkg

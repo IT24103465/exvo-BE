@@ -8,10 +8,11 @@
     "build": "dotnet build ExvoPlatform.sln",
     "test": "dotnet test ExvoPlatform.sln",
     "check": "npm run build && npm run test",
-    "load:validate": "k6 inspect tests/load/exvo-load-test.js",
-    "load:smoke": "k6 run -e PROFILE=smoke tests/load/exvo-load-test.js",
-    "load:demo": "k6 run -e PROFILE=demo tests/load/exvo-load-test.js",
-    "load:test": "k6 run -e PROFILE=load tests/load/exvo-load-test.js",
-    "load:stress": "k6 run -e PROFILE=stress tests/load/exvo-load-test.js"
+    "load:validate": "node tests/load/run-jmeter.mjs --validate",
+    "load:gui": "node tests/load/run-jmeter.mjs --gui",
+    "load:smoke": "node tests/load/run-jmeter.mjs --profile smoke",
+    "load:demo": "node tests/load/run-jmeter.mjs --profile demo",
+    "load:test": "node tests/load/run-jmeter.mjs --profile load",
+    "load:stress": "node tests/load/run-jmeter.mjs --profile stress"
   }
 }
