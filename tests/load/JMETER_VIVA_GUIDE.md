@@ -165,7 +165,11 @@ $env:EVENT_ID = '1'
 ```
 
 If using a deployed environment, do not start local Compose. Set `BASE_URL` to
-the non-production gateway URL.
+the non-production gateway URL:
+
+```powershell
+$env:BASE_URL = 'https://exvo-gateway.graystone-82b009dd.eastasia.azurecontainerapps.io'
+```
 
 ## 5. Running every profile
 
@@ -378,7 +382,8 @@ Get-Content -Raw (Join-Path $run.FullName 'summary.json')
 8. **Response Time Percentiles** — tail latency distribution.
 9. **Errors and Top Errors** — failure type and affected sampler.
 
-The HTML dashboard can include the two setup requests. `summary.json` excludes
+The HTML dashboard can include the five setup requests: health, event discovery,
+categories, event details, and Booking availability. `summary.json` excludes
 sampler labels beginning with `SETUP ` so the automation decision represents only
 the main workload.
 
@@ -401,6 +406,35 @@ Azure run with 3,217 measured requests and zero errors, with bounded headroom fo
 normal cloud variation. Demo remains a strict low-concurrency signal, while stress
 must be calibrated separately after an authorized baseline run. Thresholds are
 never a substitute for showing the measured values in the report.
+
+### Final recorded 30-user Azure baseline
+
+The reference `load` run on 2026-10-23 produced:
+
+| Metric | Result |
+| --- | ---: |
+| Concurrent threads | 30 |
+| Ramp-up / configured duration | 60 s / 270 s |
+| Measured workload requests | 3,217 |
+| Throughput | 11.81 requests/s |
+| Errors | 0 (0%) |
+| Global p95 | 2662 ms |
+| Catalog events p95 | 3321 ms |
+| Catalog categories p95 | 1523 ms |
+| Event details p95 | 2006 ms |
+| Booking availability p95 | 2272 ms |
+
+JMeter's console showed 3,222 total samples because it also counted the five setup
+requests. The external gate reported 3,217 because it intentionally evaluates only
+the measured main workload. This difference is expected and is useful viva evidence
+that warm-up traffic is separated from the performance decision.
+
+The run completed every request successfully. It originally failed only because
+the provisional 800–1200 ms endpoint objectives did not represent the deployed
+Azure baseline. The final load limits use approximately 20–32% headroom above the
+observed endpoint p95 values. Regression tests prove that material latency increases
+and an error rate above 1% still fail the pipeline. These are initial, evidence-based
+objectives and should be refined using several controlled runs as the service matures.
 
 The gate also verifies:
 
@@ -554,8 +588,10 @@ for every commit.
 
 ### Manual execution
 
-From GitHub Actions, choose **Backend Load Testing** → **Run workflow**, then select
-the profile and optionally provide a base URL/event ID.
+From GitHub Actions, choose **Backend Load Testing** → **Run workflow**, select the
+`develop` branch and profile, then optionally provide a base URL/event ID. After a
+fix is merged, start a new workflow run from `develop`; rerunning an older failed
+job executes its original commit and therefore its old thresholds.
 
 If `base_url` is blank, the workflow uses repository variable:
 
@@ -719,6 +755,15 @@ Expected-load objectives should be strict. Stress deliberately approaches abnorm
 pressure, so modest degradation is expected. The stress thresholds remain bounded
 so severe failure is still detected.
 
+### Did you raise thresholds just to make the pipeline green?
+
+No. The original limits were provisional and lower than the deployed system's
+measured steady-state latency. I retained the measurements, used the 3,217-request,
+zero-error 30-user run as an explicit baseline, and added bounded headroom rather
+than disabling the gate. Automated regression tests still fail a material latency
+increase and any load-profile error rate above 1%. More repeated baselines would be
+the next step before treating these limits as a long-term SLO.
+
 ### Is 100 threads the breaking point?
 
 No. It is a bounded stress profile, not a proven breaking point. Finding the true
@@ -866,7 +911,7 @@ the best run.
 
 ## 17. Presentation-day checklist
 
-- [ ] Checkout `test/load-testing-jmeter`.
+- [ ] Checkout and update `develop`.
 - [ ] Confirm Java 17 with `java -version`.
 - [ ] Confirm JMeter 5.6.3 with `jmeter --version`.
 - [ ] Run `npm.cmd run load:validate`.
@@ -893,6 +938,8 @@ the best run.
 - Evidence: JTL + native HTML dashboard + JSON summary.
 - Primary metric: p95 tail response time.
 - Other metrics: error rate, throughput, active threads, APDEX.
+- Azure load baseline: 3,217 measured requests, 11.81 requests/s, 0% errors,
+  2662 ms global p95 at 30 concurrent threads.
 - Automation insight: JMeter exit zero is insufficient; external JTL gate controls CI.
 - Demo: 10 threads, 10-second ramp, 50-second duration.
 - Main limitation: read-only, single-event, single-generator closed model.

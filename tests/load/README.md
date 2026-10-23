@@ -47,6 +47,16 @@ categories 2000 ms, event details 2500 ms, availability 3000 ms, and optional
 login 5000 ms. Stress retains the original strict endpoint objectives until a
 separate authorized stress baseline is captured.
 
+### Recorded Azure load baseline
+
+The 2026-10-23 reference run targeted
+`https://exvo-gateway.graystone-82b009dd.eastasia.azurecontainerapps.io` with the
+30-user `load` profile. It produced 3,217 measured workload samples at 11.81
+requests/second, zero errors, and a 2662 ms global p95. Endpoint p95 values were
+3321 ms for events, 1523 ms for categories, 2006 ms for event details, and 2272
+ms for Booking availability. The final load gates add bounded headroom above this
+observed baseline; they do not disable latency or error checking.
+
 ## Install and run
 
 Install Java 17 (Java 17–21 is supported by this plan) and Apache JMeter 5.6.3,
@@ -106,6 +116,11 @@ loads the JMX without sending traffic on relevant pushes/pull requests, supports
 manual test execution, and schedules a weekly `load` profile. Active runs produce
 JTL/HTML/JSON artifacts even when a performance gate fails.
 
+For a manual Azure run, open **Actions → Backend Load Testing → Run workflow**,
+select the `develop` branch and a profile, then provide the gateway URL above (or
+configure `LOAD_TEST_BASE_URL`). Start a new run after merging changes; **Re-run
+jobs** executes the commit used by the original run.
+
 Configure repository variable `LOAD_TEST_BASE_URL` with a deployed non-production
 gateway. Optional secrets `LOAD_TEST_EMAIL` and `LOAD_TEST_PASSWORD` enable login
 traffic. If either is absent, the login controller is skipped.
@@ -126,3 +141,6 @@ throughput depends on response times, the four HTTP operations, and think time.
 - GUI listeners are useful for debugging small runs but expensive during real load;
   CLI execution plus the post-run HTML dashboard produces more trustworthy results.
 - Read-only endpoints make repeated CI/demo runs safer and deterministic.
+- The recorded 30-user run proves functional reliability at that load (zero
+  errors), while its p95 values quantify latency; it does not prove unlimited
+  scalability or identify a server-side root cause by itself.
