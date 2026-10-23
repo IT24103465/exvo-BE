@@ -19,6 +19,8 @@ TestResults/
 coverage/
 .coverage
 .coverage.*
+tests/load/results/*
+!tests/load/results/.gitkeep
 
 # NuGet and package caches
 *.nupkg

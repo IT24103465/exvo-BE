@@ -7,6 +7,11 @@
     "restore": "dotnet restore ExvoPlatform.sln",
     "build": "dotnet build ExvoPlatform.sln",
     "test": "dotnet test ExvoPlatform.sln",
-    "check": "npm run build && npm run test"
+    "check": "npm run build && npm run test",
+    "load:validate": "k6 inspect tests/load/exvo-load-test.js",
+    "load:smoke": "k6 run -e PROFILE=smoke tests/load/exvo-load-test.js",
+    "load:demo": "k6 run -e PROFILE=demo tests/load/exvo-load-test.js",
+    "load:test": "k6 run -e PROFILE=load tests/load/exvo-load-test.js",
+    "load:stress": "k6 run -e PROFILE=stress tests/load/exvo-load-test.js"
   }
 }

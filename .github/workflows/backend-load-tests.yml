@@ -1,0 +1,126 @@
+name: Backend Load Testing
+
+on:
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - 'tests/load/**'
+      - 'package.json'
+      - '.github/workflows/backend-load-tests.yml'
+  push:
+    branches: [develop, main]
+    paths:
+      - 'tests/load/**'
+      - 'package.json'
+      - '.github/workflows/backend-load-tests.yml'
+  schedule:
+    # Tuesday 00:00 Asia/Colombo (GitHub cron is UTC).
+    - cron: '30 18 * * 1'
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Traffic profile to execute
+        required: true
+        default: demo
+        type: choice
+        options: [smoke, demo, load, stress]
+      base_url:
+        description: Gateway URL (blank uses repository variable LOAD_TEST_BASE_URL)
+        required: false
+        type: string
+      event_id:
+        description: Optional existing event ID (blank enables discovery)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: load-tests-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-script:
+    name: Validate k6 script
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up k6
+        uses: grafana/setup-k6-action@v1
+        with:
+          k6-version: '0.54.0'
+      - name: Inspect script and profiles
+        env:
+          BASE_URL: http://example.invalid
+          PROFILE: smoke
+        run: k6 inspect tests/load/exvo-load-test.js
+
+  execute-load-test:
+    name: Execute ${{ inputs.profile || 'load' }} profile
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    needs: validate-script
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      INPUT_BASE_URL: ${{ inputs.base_url }}
+      CONFIGURED_BASE_URL: ${{ vars.LOAD_TEST_BASE_URL }}
+      PROFILE: ${{ inputs.profile || 'load' }}
+      EVENT_ID: ${{ inputs.event_id }}
+      LOAD_TEST_EMAIL: ${{ secrets.LOAD_TEST_EMAIL }}
+      LOAD_TEST_PASSWORD: ${{ secrets.LOAD_TEST_PASSWORD }}
+      RESULTS_DIR: tests/load/results
+      K6_WEB_DASHBOARD: 'true'
+      K6_WEB_DASHBOARD_OPEN: 'false'
+      K6_WEB_DASHBOARD_EXPORT: tests/load/results/report.html
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up k6
+        uses: grafana/setup-k6-action@v1
+        with:
+          k6-version: '0.54.0'
+      - name: Resolve target URL
+        id: target
+        shell: bash
+        run: |
+          target="${INPUT_BASE_URL:-$CONFIGURED_BASE_URL}"
+          if [ -z "$target" ]; then
+            echo 'Set the LOAD_TEST_BASE_URL repository variable or provide base_url when dispatching.' >&2
+            exit 1
+          fi
+          if [[ "$target" != http://* && "$target" != https://* ]]; then
+            echo 'The load-test target must start with http:// or https://.' >&2
+            exit 1
+          fi
+          echo "base_url=$target" >> "$GITHUB_OUTPUT"
+      - name: Run k6 thresholds
+        env:
+          BASE_URL: ${{ steps.target.outputs.base_url }}
+        run: k6 run tests/load/exvo-load-test.js
+      - name: Publish run summary
+        if: always()
+        shell: bash
+        run: |
+          if [ ! -f tests/load/results/summary.json ]; then
+            echo 'No k6 summary was generated.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          jq -r '
+            "## k6 performance result\n" +
+            "- Requests: " + ((.metrics.http_reqs.values.count // 0) | tostring) + "\n" +
+            "- Throughput: " + ((.metrics.http_reqs.values.rate // 0) | tostring) + " requests/s\n" +
+            "- HTTP p95: " + ((.metrics.http_req_duration.values["p(95)"] // 0) | tostring) + " ms\n" +
+            "- Failure rate: " + (((.metrics.http_req_failed.values.rate // 0) * 100) | tostring) + "%\n" +
+            "- Check pass rate: " + (((.metrics.checks.values.rate // 0) * 100) | tostring) + "%"
+          ' tests/load/results/summary.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload k6 reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-${{ env.PROFILE }}-${{ github.run_id }}
+          path: tests/load/results/**
+          if-no-files-found: warn
+          retention-days: 14

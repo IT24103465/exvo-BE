@@ -238,6 +238,30 @@ Test projects:
 
 The test projects use xUnit for automated verification.
 
+### Load and performance testing with k6
+
+Owner: IT24103465
+
+The k6 suite exercises the gateway, public Catalog reads, event details, Booking
+availability, and optional Auth login with smoke, demo, load, and stress profiles.
+It enforces automated latency, error-rate, and functional-check thresholds and
+produces JSON plus interactive HTML reports.
+
+With the backend running locally:
+
+```powershell
+$env:BASE_URL = 'http://localhost:5000'
+npm run load:demo
+```
+
+Use `npm run load:smoke` for a preflight, `npm run load:test` for the normal
+30-user workload, and `npm run load:stress` only against an approved
+non-production target. The dedicated `Backend Load Testing` GitHub Actions
+workflow validates the script on changes, supports manual runs, schedules a
+weekly load run, and uploads its reports. See
+[`tests/load/README.md`](tests/load/README.md) for profiles, CI configuration,
+metric interpretation, demo steps, and VIVA notes.
+
 ### Mutation testing with Stryker.NET
 
 The pilot selects `BookingService` and
