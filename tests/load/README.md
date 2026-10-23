@@ -33,15 +33,19 @@ breached:
 | Profile | Maximum errors | Global p95 |
 | --- | ---: | ---: |
 | `smoke` | 2% | 5000 ms |
-| `demo` / `load` | 1% | 1000 ms |
+| `demo` | 1% | 1000 ms |
+| `load` | 1% | 3500 ms |
 | `stress` | 3% | 1800 ms |
 
 Smoke uses deployment-oriented endpoint ceilings: Catalog events 5000 ms,
 categories 3000 ms, event details 4000 ms, Booking availability 4000 ms, and
 optional login 5000 ms. This small profile can include Azure cold-start and
-network latency. Demo, load, and stress retain the stricter endpoint objectives:
-800 ms for Catalog/event requests, 1200 ms for Booking availability, and 1500 ms
-for optional login.
+network latency. Demo retains the stricter endpoint objectives: 800 ms for
+Catalog/event requests, 1200 ms for Booking availability, and 1500 ms for login.
+The load profile is calibrated from the 30-user Azure baseline: events 4000 ms,
+categories 2000 ms, event details 2500 ms, availability 3000 ms, and optional
+login 5000 ms. Stress retains the original strict endpoint objectives until a
+separate authorized stress baseline is captured.
 
 ## Install and run
 
