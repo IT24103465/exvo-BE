@@ -24,6 +24,11 @@ function runGate(profile, failedSample = null) {
   let timestamp = 1_790_000_000_000;
   let sampleIndex = 0;
 
+  // Setup warm-up latency remains visible in JTL/HTML but must not influence
+  // the measured workload gate.
+  rows.push(`${timestamp},8160,SETUP GET /api/booking/events/:id/availability,true`);
+  timestamp += 8170;
+
   for (const [label, durations] of Object.entries(azureSmokeSamples)) {
     for (const elapsed of durations) {
       const success = sampleIndex !== failedSample;
@@ -47,6 +52,7 @@ test('Azure-like baseline passes the deployment-oriented smoke gates', () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(summary.passed, true);
+  assert.equal(summary.requests, 16);
   assert.equal(summary.p95Milliseconds, 3106);
   assert.equal(summary.limits.globalP95Milliseconds, 5000);
   assert.equal(summary.endpoints['GET /api/catalog/categories'].thresholdMilliseconds, 3000);

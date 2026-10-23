@@ -9,9 +9,12 @@ model answers, troubleshooting, and a timed demo script, read
 
 The JMeter test plan sends read-only traffic through the API gateway and measures
 the Gateway, Catalog, Booking, and optionally Auth services. A one-user setup
-thread first checks gateway health and discovers a valid event. The main thread
-group then browses events/categories, reads that event, checks Booking availability,
-and optionally logs in. It never creates users, bookings, holds, or check-ins.
+thread first checks gateway health, discovers a valid event, and warms each
+required read endpoint once. The main thread group then browses events/categories,
+reads that event, checks Booking availability, and optionally logs in. It never
+creates users, bookings, holds, or check-ins. Setup samples remain visible in the
+HTML report but are excluded from the performance gate, so measured p95 values
+represent steady-state traffic rather than Azure Container Apps cold starts.
 
 ## Profiles
 

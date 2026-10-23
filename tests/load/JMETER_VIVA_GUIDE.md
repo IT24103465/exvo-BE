@@ -25,8 +25,10 @@ One complete default journey contains:
 6. Random think time between 0.5 and 1.5 seconds
 
 Before load begins, a JMeter Setup Thread Group calls `/health`, requests the
-event list, and extracts the first event ID. This makes event and Booking requests
-use real application data without hard-coding an ID.
+event list, and extracts the first event ID. It then calls Categories, Event
+Details, and Booking availability once to warm the required Azure services. This
+makes the measured journey use real application data without hard-coding an ID
+and separates deployment cold-start latency from steady-state response time.
 
 The suite provides:
 
@@ -55,6 +57,7 @@ exvo-load-test.jmx
         |     +-- GET /api/catalog/events
         |     +-- JSON Extractor: first event ID
         |     +-- Groovy: publish ID as a global JMeter property
+        |     +-- Warm Categories, Event Details, and Booking
         |
         +-- Main Thread Group
               +-- Catalog events
@@ -272,7 +275,11 @@ would consume memory and distort a load test.
 ### Setup Thread Group
 
 Runs before the main group. It performs gateway preflight and data discovery once,
-instead of making every simulated user discover the event.
+then warms Categories, Event Details, and Booking availability. This avoids making
+every simulated user discover the event and prevents Azure cold starts from
+dominating the very small smoke sample. Every warm-up label begins with `SETUP `,
+so the machine-readable gate excludes it while the HTML dashboard retains it for
+transparency.
 
 ### HTTP Request Defaults
 
