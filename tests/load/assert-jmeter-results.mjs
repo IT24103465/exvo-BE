@@ -45,28 +45,39 @@ const limits = {
 };
 if (!limits[profile]) throw new Error(`Unknown profile '${profile}'.`);
 
-function parseCsvLine(line) {
-  const values = [];
+function parseCsv(text) {
+  const records = [];
+  let record = [];
   let value = '';
   let quoted = false;
-  for (let index = 0; index < line.length; index += 1) {
-    const character = line[index];
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
     if (character === '"') {
-      if (quoted && line[index + 1] === '"') {
+      if (quoted && text[index + 1] === '"') {
         value += '"';
         index += 1;
       } else {
         quoted = !quoted;
       }
     } else if (character === ',' && !quoted) {
-      values.push(value);
+      record.push(value);
       value = '';
+    } else if ((character === '\r' || character === '\n') && !quoted) {
+      record.push(value);
+      if (record.some((field) => field !== '')) records.push(record);
+      record = [];
+      value = '';
+      if (character === '\r' && text[index + 1] === '\n') index += 1;
     } else {
       value += character;
     }
   }
-  values.push(value);
-  return values;
+  if (quoted) throw new Error('JTL contains an unterminated quoted CSV field.');
+  if (record.length > 0 || value !== '') {
+    record.push(value);
+    if (record.some((field) => field !== '')) records.push(record);
+  }
+  return records;
 }
 
 function percentile(values, percentage) {
@@ -75,21 +86,27 @@ function percentile(values, percentage) {
   return sorted[Math.max(0, Math.ceil((percentage / 100) * sorted.length) - 1)];
 }
 
-const lines = readFileSync(resultsPath, 'utf8').replace(/^\uFEFF/, '').trim().split(/\r?\n/);
-if (lines.length < 2) throw new Error('JMeter produced no sample results.');
+const records = parseCsv(readFileSync(resultsPath, 'utf8').replace(/^\uFEFF/, ''));
+if (records.length < 2) throw new Error('JMeter produced no sample results.');
 
-const headers = parseCsvLine(lines[0]);
+const headers = records[0];
 const indexes = Object.fromEntries(headers.map((header, index) => [header, index]));
 for (const required of ['timeStamp', 'elapsed', 'label', 'success']) {
   if (indexes[required] === undefined) throw new Error(`JTL is missing required '${required}' column.`);
 }
 
-const samples = lines.slice(1).map(parseCsvLine).map((columns) => ({
-  timestamp: Number(columns[indexes.timeStamp]),
-  elapsed: Number(columns[indexes.elapsed]),
-  label: columns[indexes.label],
-  success: columns[indexes.success].toLowerCase() === 'true',
-})).filter((sample) => !sample.label.startsWith('SETUP '));
+const samples = records.slice(1).map((columns, index) => {
+  const requiredColumnIndex = Math.max(indexes.timeStamp, indexes.elapsed, indexes.label, indexes.success);
+  if (columns.length <= requiredColumnIndex) {
+    throw new Error(`JTL record ${index + 2} is missing one or more required fields.`);
+  }
+  return {
+    timestamp: Number(columns[indexes.timeStamp]),
+    elapsed: Number(columns[indexes.elapsed]),
+    label: columns[indexes.label],
+    success: columns[indexes.success].toLowerCase() === 'true',
+  };
+}).filter((sample) => !sample.label.startsWith('SETUP '));
 
 if (samples.length === 0) throw new Error('JMeter produced no main workload samples.');
 

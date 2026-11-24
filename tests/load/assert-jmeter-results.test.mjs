@@ -23,23 +23,24 @@ const azureLoadSamples = {
   'GET /api/booking/events/:id/availability': [1900, 2000, 2100, 2200, 2272],
 };
 
-function runGate(profile, failedSample = null, workloadSamples = azureSmokeSamples) {
+function runGate(profile, failedSample = null, workloadSamples = azureSmokeSamples, multilineSample = null) {
   const directory = mkdtempSync(join(tmpdir(), 'exvo-jmeter-gate-'));
   const resultsPath = join(directory, 'results.jtl');
   const summaryPath = join(directory, 'summary.json');
-  const rows = ['timeStamp,elapsed,label,success'];
+  const rows = [`timeStamp,elapsed,label${multilineSample === null ? '' : ',responseMessage'},success`];
   let timestamp = 1_790_000_000_000;
   let sampleIndex = 0;
 
   // Setup warm-up latency remains visible in JTL/HTML but must not influence
   // the measured workload gate.
-  rows.push(`${timestamp},8160,SETUP GET /api/booking/events/:id/availability,true`);
+  rows.push(`${timestamp},8160,SETUP GET /api/booking/events/:id/availability${multilineSample === null ? '' : ','},true`);
   timestamp += 8170;
 
   for (const [label, durations] of Object.entries(workloadSamples)) {
     for (const elapsed of durations) {
       const success = sampleIndex !== failedSample;
-      rows.push(`${timestamp},${elapsed},${label},${success}`);
+      const responseMessage = sampleIndex === multilineSample ? '"Upstream error\nPlease retry"' : '';
+      rows.push(`${timestamp},${elapsed},${label}${multilineSample === null ? '' : `,${responseMessage}`},${success}`);
       timestamp += elapsed + 10;
       sampleIndex += 1;
     }
@@ -101,6 +102,16 @@ test('smoke continues to fail when the error-rate objective is breached', () => 
 
   assert.equal(result.status, 1);
   assert.equal(summary.passed, false);
+  assert.equal(summary.errorRatePercent, 6.25);
+  assert.ok(summary.violations.some((violation) => violation.startsWith('Error rate')));
+});
+
+test('quoted newlines in JTL fields do not split samples or lose their success status', () => {
+  const { result, summary } = runGate('smoke', 0, azureSmokeSamples, 0);
+
+  assert.equal(result.status, 1);
+  assert.equal(summary.requests, 16);
+  assert.equal(summary.errors, 1);
   assert.equal(summary.errorRatePercent, 6.25);
   assert.ok(summary.violations.some((violation) => violation.startsWith('Error rate')));
 });
